@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jiko</title>
+  <script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+</head>
+<body style="font-family:sans-serif;padding:16px">
+  <h2>Link your wallet to Jiko</h2>
+  <div id="ton-connect"></div>
+  <p id="status">Not connected</p>
+  <script>
+    const ui = new TON_CONNECT_UI.TonConnectUI({
+      manifestUrl: 'https://h30h30.github.io/REPO/tonconnect-manifest.json',
+      buttonRootId: 'ton-connect'
+    });
+    ui.onStatusChange(wallet => {
+      const s = document.getElementById('status');
+      if (!wallet) { s.textContent = 'Not connected'; return; }
+      const addr = TON_CONNECT_UI.toUserFriendlyAddress(wallet.account.address);
+      s.textContent = 'Connected: ' + addr + ' | chain: ' + wallet.account.chain;
+    });
+  </script>
+</body>
+</html>
