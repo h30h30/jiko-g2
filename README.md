@@ -1,6 +1,6 @@
 # minimal
 
-Bare Even Hub G2 starter. Vite + TypeScript + SDK + CLI + simulator, one text container that renders `Hello from G2!`.
+Bare Even Hub G2 starter. Vite + TypeScript + SDK + CLI + simulator, one text container that renders `Hello Jiko!`.
 
 ## Run
 
