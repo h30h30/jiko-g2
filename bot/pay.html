@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jiko Pay</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+</head>
+<body style="font-family:sans-serif;padding:16px">
+  <h2>Confirm payment</h2>
+  <div id="ton-connect"></div>
+  <p id="info"></p>
+  <button id="pay" disabled style="padding:10px 16px">Send</button>
+  <p id="result"></p>
+  <script>
+    const p = new URLSearchParams(location.search);
+    const to = p.get('to');
+    const amount = Number(p.get('amount'));
+    const name = p.get('name') || '';
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (tg) tg.ready();
+    document.getElementById('info').textContent =
+      'Send ' + amount + ' GRAM to @' + name + ' (testnet)';
+
+    const ui = new TON_CONNECT_UI.TonConnectUI({
+      manifestUrl: 'https://raw.githubusercontent.com/h30h30/jiko-g2/main/docs/tonconnect-manifest-v2.json',
+      buttonRootId: 'ton-connect'
+    });
+    const btn = document.getElementById('pay');
+    ui.onStatusChange(w => { btn.disabled = !(w && to && amount > 0); });
+
+    btn.onclick = async () => {
+      const out = document.getElementById('result');
+      try {
+        await ui.sendTransaction({
+          validUntil: Math.floor(Date.now() / 1000) + 300,
+          network: '-3',
+          messages: [{ address: to, amount: String(Math.round(amount * 1e9)) }]
+        });
+        out.textContent = 'Sent ✅ Check your wallet.';
+      } catch (e) {
+        out.textContent = 'Cancelled or failed: ' + (e.message || e);
+      }
+    };
+  </script>
+</body>
+</html>
