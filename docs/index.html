@@ -27,7 +27,7 @@
       const addr = TON_CONNECT_UI.toUserFriendlyAddress(wallet.account.address);
       current = { address: addr, chain: wallet.account.chain };
       s.textContent = 'Connected: ' + addr + ' | chain: ' + wallet.account.chain;
-      if (tg && tg.initData) b.style.display = 'inline-block';
+            b.style.display = 'inline-block';
     });
     document.getElementById('send').onclick = () => {
       if (current && tg) tg.sendData(JSON.stringify(current));
