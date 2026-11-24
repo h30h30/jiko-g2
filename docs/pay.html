@@ -18,29 +18,46 @@
     const to = p.get('to');
     const amount = Number(p.get('amount'));
     const name = p.get('name') || '';
+    const rid = p.get('r') || '';
+    const exp = Number(p.get('exp')) || 0;
     const tg = window.Telegram && window.Telegram.WebApp;
     if (tg) tg.ready();
-    document.getElementById('info').textContent =
-      'Send ' + amount + ' GRAM to @' + name + ' (testnet)';
+
+    const info = document.getElementById('info');
+    const out = document.getElementById('result');
+    const btn = document.getElementById('pay');
+    const now = () => Math.floor(Date.now() / 1000);
+    let used = false;
+    try { used = localStorage.getItem('used:' + rid) === '1'; } catch (e) {}
+
+    info.textContent = 'Send ' + amount + ' GRAM to @' + name + ' (testnet)';
+    const invalid = () => !rid || !exp || !to || !(amount > 0);
+    const locked = () => invalid() || used || now() > exp;
+    if (invalid()) out.textContent = 'Invalid request link.';
+    else if (used) out.textContent = 'This request was already used.';
+    else if (now() > exp) out.textContent = 'This request expired. Ask the bot for a new one.';
 
     const ui = new TON_CONNECT_UI.TonConnectUI({
       manifestUrl: 'https://raw.githubusercontent.com/h30h30/jiko-g2/main/docs/tonconnect-manifest-v2.json',
       buttonRootId: 'ton-connect'
     });
-    const btn = document.getElementById('pay');
-    ui.onStatusChange(w => { btn.disabled = !(w && to && amount > 0); });
+    ui.onStatusChange(w => { btn.disabled = !w || locked(); });
 
     btn.onclick = async () => {
-      const out = document.getElementById('result');
+      if (locked()) return;
+      btn.disabled = true;
       try {
         await ui.sendTransaction({
-          validUntil: Math.floor(Date.now() / 1000) + 300,
+          validUntil: exp,
           network: '-3',
           messages: [{ address: to, amount: String(Math.round(amount * 1e9)) }]
         });
+        try { localStorage.setItem('used:' + rid, '1'); } catch (e) {}
+        used = true;
         out.textContent = 'Sent ✅ Check your wallet.';
       } catch (e) {
         out.textContent = 'Cancelled or failed: ' + (e.message || e);
+        btn.disabled = locked();
       }
     };
   </script>
