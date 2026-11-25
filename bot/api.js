@@ -101,6 +101,69 @@ async function transcribe(pcm) {
   return text;
 }
 
+// AI Assistant router: understands natural speech and answers general questions for Even G2 display
+async function understandVoice(transcript) {
+  const t0 = Date.now();
+  const url =
+    "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
+
+  const systemPrompt =
+    "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON crypto tip wallet.\n" +
+    "Classify the user's spoken input into ONE JSON object (no markdown, raw JSON only):\n" +
+    '1) Sending money/tip: {"type":"tip","amount":<number>,"name":"<recipient name>"}\n' +
+    '2) Requesting money from someone: {"type":"ask","amount":<number>,"name":"<payer name>"}\n' +
+    '3) Checking wallet balance: {"type":"balance"}\n' +
+    '4) Checking recent transactions/activity: {"type":"history"}\n' +
+    '5) Any general question, calculation, translation, crypto info, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
+    "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown, formatted for a tiny heads-up display.";
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": process.env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [{ text: systemPrompt + '\n\nUser said: "' + transcript + '"' }],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+        },
+      }),
+    });
+    if (!res.ok) throw new Error("Gemini AI " + res.status);
+    const json = await res.json();
+    const raw = (json.candidates?.[0]?.content?.parts ?? [])
+      .map((p) => p.text ?? "")
+      .join("")
+      .trim();
+    const parsed = JSON.parse(raw);
+    console.log(`[TIMING] Gemini AI intent (${parsed.type}): ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+
+    if (parsed.type === "tip" && Number(parsed.amount) > 0 && parsed.name) {
+      return { type: "tip", amount: Number(parsed.amount), name: String(parsed.name).trim() };
+    }
+    if (parsed.type === "ask" && Number(parsed.amount) > 0 && parsed.name) {
+      return { type: "ask", amount: Number(parsed.amount), name: String(parsed.name).trim() };
+    }
+    if (parsed.type === "balance" || parsed.type === "history") {
+      return { type: parsed.type };
+    }
+    if (parsed.type === "answer" && parsed.reply) {
+      return { type: "answer", reply: String(parsed.reply).trim().slice(0, 140) };
+    }
+  } catch (e) {
+    console.error("AI ROUTER FALLBACK:", e.message);
+  }
+
+  return parseCommand(transcript);
+}
+
 async function fetchBalance(address) {
   const t0 = Date.now();
   const r = await fetch(TONCENTER_BAL + "?address=" + encodeURIComponent(address));
@@ -152,7 +215,6 @@ const reply = (res, code, obj) => {
   res.end(JSON.stringify(obj));
 };
 
-// edits the original "Review & sign" message if we have it, otherwise sends a new one
 async function notify(bot, w, text) {
   try {
     if (w.messageId) await bot.api.editMessageText(w.senderId, w.messageId, text);
@@ -174,7 +236,7 @@ async function checkWatches(bot) {
       await notify(
         bot,
         w,
-        "⌛ Not completed: no transaction was seen. It was cancelled, rejected or not signed in time. Send it again if you still want to."
+        "⌛ Not completed: no transaction was seen. It was cancelled, rejected or not signed in time."
       );
       continue;
     }
@@ -208,7 +270,6 @@ async function checkWatches(bot) {
   }
 }
 
-// used by /pair in bot.js
 export function createPairCode(userId) {
   const now = Date.now();
   for (const [k, v] of pairCodes) {
@@ -219,7 +280,6 @@ export function createPairCode(userId) {
   return code;
 }
 
-// used by /tip and pending invites in bot.js
 export function watchPayment(w, customId) {
   const id = customId || crypto.randomBytes(8).toString("hex");
   watching.set(id, { ...w, since: Date.now(), status: "waiting" });
@@ -250,7 +310,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           const w = watching.get(id);
           if (w && w.status === "waiting") {
             w.status = "cancelled";
-            await notify(bot, w, "❌ Tip cancelled in wallet.");
+            await notify(bot, w, "❌ Payment cancelled in wallet.");
           }
           return reply(res, 200, { ok: true });
         }
@@ -272,11 +332,13 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           const sessions = loadSessions();
           sessions[token] = entry.userId;
           saveSessions(sessions);
+          const balance = await fetchBalance(me.address).catch(() => null);
           return reply(res, 200, {
             ok: true,
             token,
             label: userLabel(me),
             wallet: short(me.address),
+            balance,
           });
         }
 
@@ -285,10 +347,12 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!senderId) return reply(res, 401, { ok: false, error: "Not paired" });
           const me = load()[senderId];
           if (!me?.address) return reply(res, 401, { ok: false, error: "Wallet unlinked" });
+          const balance = await fetchBalance(me.address).catch(() => null);
           return reply(res, 200, {
             ok: true,
             label: userLabel(me),
             wallet: short(me.address),
+            balance,
           });
         }
 
@@ -304,7 +368,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           return reply(res, 200, { ok: true });
         }
 
-        // All endpoints below require a paired glasses session
         const senderId = getAuthUserId(req);
         if (!senderId) {
           return reply(res, 401, { ok: false, error: "Not paired" });
@@ -317,15 +380,24 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
 
         if (req.url === "/command") {
           const { text } = JSON.parse((await readBody(req, 10_000)).toString() || "{}");
-          const cmd = parseCommand(text ?? "");
+          const cmd = await understandVoice(text ?? "");
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: "Didn't get that.\nTry: send 1 gram to Alex,\ncheck balance, or last tips",
+              message: "Didn't get that.\nTry: send 1 gram to Alex,\nask Alex for 2 gram, or ask anything",
             });
           }
 
-          // Balance check (100% hands-free, no phone needed)
+          // General AI Assistant answer on G2 display
+          if (cmd.type === "answer") {
+            return reply(res, 200, {
+              ok: true,
+              type: "answer",
+              message: cmd.reply,
+            });
+          }
+
+          // Balance check (100% hands-free)
           if (cmd.type === "balance") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -339,6 +411,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, {
                 ok: true,
                 type: "balance",
+                balance: bal,
                 message: "Balance: " + bal + " GRAM\nWallet: " + short(me.address) + "\n(testnet)",
               });
             } catch (e) {
@@ -350,7 +423,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Recent transactions (100% hands-free, no phone needed)
+          // Recent transactions (100% hands-free)
           if (cmd.type === "history") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -375,6 +448,30 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
+          // Payment request: "ask Alex for 2 gram"
+          if (cmd.type === "ask") {
+            if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
+            const payer = findRecipient(cmd.name);
+            if (payer?.ambiguous) {
+              return reply(res, 200, {
+                ok: false,
+                message: 'Several matches for\n"' + cmd.name + '".\nSay the voice name.',
+              });
+            }
+            if (!payer) {
+              return reply(res, 200, { ok: false, message: 'No linked wallet for\n"' + cmd.name + '"' });
+            }
+            const id = crypto.randomBytes(8).toString("hex");
+            const label = payer.username ? "@" + payer.username : payer.first_name || cmd.name;
+            pending.set(id, { kind: "ask", senderId, payer, amount: cmd.amount, label, at: Date.now() });
+            return reply(res, 200, {
+              ok: true,
+              type: "ask",
+              id,
+              summary: "Ask " + label + " for\n" + cmd.amount + " GRAM?",
+            });
+          }
+
           // Tip command
           if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
           const user = findRecipient(cmd.name);
@@ -385,7 +482,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Recipient has not linked a wallet yet -> offer one-tap Telegram invite from glasses
           if (!user) {
             const id = crypto.randomBytes(8).toString("hex");
             pending.set(id, {
@@ -422,7 +518,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             return reply(res, 200, { ok: false, message: "Expired" });
           }
 
-          // One-tap invite triggered from G2 glasses
           if (p.kind === "invite") {
             const cleanName = p.targetName.toLowerCase().replace(/^@/, "").replace(/\s+/g, "");
             const draftId = createInviteDraft(senderId, cleanName, p.amount);
@@ -442,6 +537,57 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               ok: true,
               type: "invite",
               message: "Invite ready in Telegram!\nCheck Jiko bot for @" + cleanName,
+            });
+          }
+
+          // Send payment request directly to the payer in Telegram
+          if (p.kind === "ask") {
+            const me = load()[senderId];
+            if (!me?.address) {
+              return reply(res, 200, { ok: false, message: "Link your wallet first" });
+            }
+            const requesterLabel = userLabel(me);
+            const sentToPayer = await bot.api
+              .sendMessage(
+                p.payer.id,
+                "💸 " + requesterLabel + " requested " + p.amount + " GRAM from you (testnet).\nValid for 5 minutes.",
+                {
+                  reply_markup: new InlineKeyboard().webApp(
+                    "Review & sign",
+                    payLink({ ...me, id: senderId }, p.amount, id)
+                  ),
+                }
+              )
+              .catch(() => null);
+
+            if (!sentToPayer) {
+              return reply(res, 200, { ok: false, message: "Could not reach " + p.label });
+            }
+
+            if (p.payer.address) {
+              watching.set(id, {
+                senderAddr: p.payer.address,
+                senderId: p.payer.id,
+                senderLabel: p.label,
+                recipientId: senderId,
+                recipientAddr: me.address,
+                nano: String(Math.round(p.amount * 1e9)),
+                amount: p.amount,
+                label: requesterLabel,
+                messageId: sentToPayer.message_id,
+                since: Date.now(),
+                status: "waiting",
+              });
+            }
+
+            await bot.api
+              .sendMessage(senderId, "📩 Sent payment request (" + p.amount + " GRAM) to " + p.label + ".")
+              .catch(() => {});
+
+            return reply(res, 200, {
+              ok: true,
+              type: "ask",
+              message: "Request sent to\n" + p.label + "!",
             });
           }
 

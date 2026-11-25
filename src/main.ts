@@ -50,6 +50,7 @@ const userInfo = document.getElementById('user-info')
 const unpairBtn = document.getElementById('unpair-btn') as HTMLButtonElement | null
 
 let token = ''
+let liveBalance = ''
 try {
   token = localStorage.getItem(TOKEN_KEY) || ''
 } catch {
@@ -92,7 +93,6 @@ async function post(path: string, body: BodyInit, type: string) {
 }
 const postJson = (path: string, obj: unknown) => post(path, JSON.stringify(obj), 'application/json')
 
-// A single tap arrives with eventType undefined (protobuf omits 0), so it counts as CLICK.
 function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeList | null {
   if (!envelope) return null
   return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
@@ -116,6 +116,8 @@ function clearTimers() {
   }
 }
 
+const homeHeader = () => (liveBalance ? 'Jiko · ' + liveBalance + ' GRAM' : 'Jiko')
+
 const idle = async (text: string) => {
   state = 'idle'
   pendingId = ''
@@ -125,6 +127,7 @@ const idle = async (text: string) => {
 
 async function handleExpiredSession() {
   saveToken('')
+  liveBalance = ''
   state = 'idle'
   pendingId = ''
   clearTimers()
@@ -140,8 +143,9 @@ async function initSession() {
   }
   try {
     const me = await postJson('/me', {})
+    if (me.balance) liveBalance = String(me.balance)
     renderPaired(me.label, me.wallet)
-    await show('Jiko\nTap to talk')
+    await show(homeHeader() + '\n\nTap to talk')
   } catch (e) {
     if (e instanceof AuthError) {
       await handleExpiredSession()
@@ -168,9 +172,10 @@ async function doPair() {
       return
     }
     saveToken(res.token)
+    if (res.balance) liveBalance = String(res.balance)
     if (codeInput) codeInput.value = ''
     renderPaired(res.label, res.wallet)
-    await idle('Paired! (' + res.label + ')')
+    await idle('Paired! (' + res.label + ')' + (liveBalance ? '\nBalance: ' + liveBalance + ' GRAM' : ''))
   } catch (e) {
     console.error(e)
     if (pairMsg) pairMsg.textContent = 'Cannot reach Jiko server.'
@@ -194,6 +199,7 @@ unpairBtn?.addEventListener('click', async () => {
     // ignore network errors on unpair
   }
   saveToken('')
+  liveBalance = ''
   state = 'idle'
   pendingId = ''
   clearTimers()
@@ -281,11 +287,22 @@ bridge.onEvenHubEvent(async event => {
       if (!text) return await idle('Nothing heard')
       const cmd = await postJson('/command', { text })
       if (!cmd.ok) return await idle(cmd.message + '\n\nHeard: "' + text + '"')
-      if (cmd.type === 'balance' || cmd.type === 'history') return await idle(cmd.message)
+      if (cmd.type === 'balance') {
+        if (cmd.balance) liveBalance = String(cmd.balance)
+        return await idle(cmd.message)
+      }
+      if (cmd.type === 'history' || cmd.type === 'answer') {
+        return await idle(cmd.message)
+      }
 
       pendingId = cmd.id
       state = 'confirming'
-      const actionLabel = cmd.type === 'invite' ? 'Tap = send invite' : 'Tap = confirm'
+      const actionLabel =
+        cmd.type === 'invite'
+          ? 'Tap = send invite'
+          : cmd.type === 'ask'
+            ? 'Tap = send request'
+            : 'Tap = confirm'
       await show(cmd.summary + '\n\n' + actionLabel + '\n2x Tap = cancel (8s)')
       cancelTimer = setTimeout(() => {
         if (state === 'confirming') idle('Cancelled')
@@ -305,7 +322,9 @@ bridge.onEvenHubEvent(async event => {
       const id = pendingId
       const r = await postJson('/confirm', { id })
       if (!r.ok) return await idle(r.message)
-      if (r.type === 'invite') return await idle(r.message || 'Invite sent to Telegram!')
+      if (r.type === 'invite' || r.type === 'ask') {
+        return await idle(r.message || 'Done!')
+      }
 
       state = 'waiting'
       await show('Sign in your wallet\n(see Telegram)\n\nTap to stop waiting')

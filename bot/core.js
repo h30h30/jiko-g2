@@ -11,7 +11,7 @@ export const setBotUsername = (name) => {
   if (name) botUsername = name;
 };
 
-// Shared in-memory store for unregistered recipient invites (used by both bot.js and api.js)
+// Shared in-memory store for unregistered recipient invites
 const inviteDrafts = new Map();
 const pendingInvites = [];
 
@@ -102,40 +102,54 @@ export function canonicalAddr(addr) {
 
 const NUM = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, half: 0.5 };
 
-// Parses tip ("send 1 gram to Alex"), recent transactions ("last transactions"), or balance ("check balance")
+function extractAmount(str) {
+  const d = str.match(/\d+(\.\d+)?/);
+  if (d) return Number(d[0]);
+  for (const w of str.split(" ")) {
+    if (Object.hasOwn(NUM, w)) return NUM[w];
+  }
+  return null;
+}
+
+// Deterministic fallback parser for tip, payment request (ask), history, and balance
 export function parseCommand(text) {
   const t = text.toLowerCase().replace(/[^a-z0-9.@_\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // 1) Tip command
+  // 1) Payment request: "ask Alex for 2 gram" or "request 2 gram from Alex"
+  const askMatch = t.match(/\b(?:ask|request)\s+@?([a-z0-9_]+)\s+(?:for|to send|to pay)\s+(.+)$/);
+  if (askMatch) {
+    const amount = extractAmount(askMatch[2]);
+    if (amount > 0) return { type: "ask", amount, name: askMatch[1] };
+  }
+  const reqFromMatch = t.match(/\b(?:ask|request)\s+(.+?)\s+from\s+@?([a-z0-9_]+)$/);
+  if (reqFromMatch) {
+    const amount = extractAmount(reqFromMatch[1]);
+    if (amount > 0) return { type: "ask", amount, name: reqFromMatch[2] };
+  }
+
+  // 2) Tip command: "send 1 gram to Alex"
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
     const name = t.slice(i + 4).replace(/^@/, "").replace(/\.+$/, "").trim();
     if (/\b(send|tip|give|pay)\b/.test(left) && name) {
-      let amount = null;
-      const d = left.match(/\d+(\.\d+)?/);
-      if (d) amount = Number(d[0]);
-      else {
-        for (const w of left.split(" ")) {
-          if (Object.hasOwn(NUM, w)) { amount = NUM[w]; break; }
-        }
-      }
+      const amount = extractAmount(left);
       if (amount > 0) return { type: "tip", amount, name };
     }
   }
 
-  // 2) Recent transactions / activity command
+  // 3) Recent transactions / activity command
   if (
-    !/\b(send|tip|give|pay)\b/.test(t) &&
+    !/\b(send|tip|give|pay|ask|request)\b/.test(t) &&
     /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
   ) {
     return { type: "history" };
   }
 
-  // 3) Wallet balance command
+  // 4) Wallet balance command
   if (
-    !/\b(send|tip|give|pay)\b/.test(t) &&
+    !/\b(send|tip|give|pay|ask|request)\b/.test(t) &&
     (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))
   ) {
     return { type: "balance" };
@@ -157,7 +171,6 @@ function lev(a, b) {
   return m[a.length][b.length];
 }
 
-// spoken-friendly: lowercase, leetspeak digits -> letters, drop everything else
 const LEET = { 0: "o", 1: "i", 3: "e", 4: "a", 5: "s", 7: "t", 8: "b" };
 const norm = (s) =>
   (s ?? "")
@@ -165,7 +178,6 @@ const norm = (s) =>
     .replace(/[0-9]/g, (d) => LEET[d] ?? "")
     .replace(/[^a-z]/g, "");
 
-// finds a linked user by (approximate) voice name, username or first name
 export function findRecipient(name) {
   const q = norm(name);
   if (!q) return null;

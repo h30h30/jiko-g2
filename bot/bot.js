@@ -25,20 +25,21 @@ const HELP =
   "How Jiko works 🐦\n\n" +
   "1) Link your wallet: /start, then tap the wallet button (testnet wallet via TON Connect).\n" +
   "2) Pair your G2 glasses: send /pair and enter the 6-digit code in the Jiko companion app.\n" +
-  "3) On your glasses, tap and say:\n" +
+  "3) Speak naturally to your G2 glasses:\n" +
   "   • \"send 1 gram to Alex\"\n" +
-  "   • \"check my balance\"\n" +
-  "   • \"last transactions\"\n" +
-  "4) For tips, tap once on G2 to confirm, then approve in your wallet.\n\n" +
+  "   • \"ask Alex for 2 gram\"\n" +
+  "   • \"check my balance\" or \"last transactions\"\n" +
+  "   • Or ask any quick question (math, TON info, etc.)\n\n" +
   "Commands:\n" +
   "/start - link or change your wallet\n" +
   "/pair - get a code to connect your G2 glasses\n" +
   "/tip @user amount - send a tip (max 10 GRAM)\n" +
+  "/ask @user amount - request GRAM from a friend\n" +
   "/wallet - show your linked wallet\n" +
   "/voicename Name - set an easy name friends say to G2\n" +
   "/unlink - remove your wallet from Jiko\n" +
   "/help - this message\n\n" +
-  "Testnet only: no real money. Each tip signing request is valid for 5 minutes.";
+  "Testnet only: no real money. Each signing request is valid for 5 minutes.";
 
 bot.catch((err) => console.error("BOT ERROR:", err));
 
@@ -57,9 +58,8 @@ bot.command("start", async (ctx) => {
   }
   return ctx.reply(
     "Hi, I'm Jiko 🐦\n" +
-      "I help you send crypto tips on TON (testnet demo) with one short command, " +
-      "and by voice from your Even G2 glasses.\n\n" +
-      "Tap the button below to link your wallet. For instructions, see /help.",
+      "Your AI voice assistant & non-custodial TON tip wallet on Even G2 glasses.\n\n" +
+      "Tap the button below to link your testnet wallet. For instructions, see /help.",
     { reply_markup: walletKeyboard(false) }
   );
 });
@@ -110,6 +110,61 @@ bot.command("voicename", async (ctx) => {
   me.alias = name;
   save(db);
   return ctx.reply("Voice name set: " + name + " ✅");
+});
+
+bot.command("ask", async (ctx) => {
+  const [, rawUser, rawAmount] = ctx.message.text.trim().split(/\s+/);
+  const username = (rawUser ?? "").replace(/^@/, "").toLowerCase();
+  const amount = Number(rawAmount);
+  if (!username || !(amount > 0) || amount > 10) {
+    return ctx.reply("Usage: /ask @username 2  (max 10 GRAM, testnet)");
+  }
+  const db = load();
+  const me = db[ctx.from.id];
+  if (!me?.address) return ctx.reply("Link your wallet first with /start.");
+
+  const entry = Object.entries(db).find(
+    ([, u]) => (u.username ?? "").toLowerCase() === username
+  );
+  if (!entry) {
+    return ctx.reply("@" + username + " hasn't linked a wallet yet.");
+  }
+
+  const payer = { ...entry[1], id: entry[0] };
+  const requesterLabel = me.username ? "@" + me.username : me.first_name || "someone";
+  const watchId = crypto.randomBytes(8).toString("hex");
+  const sent = await bot.api
+    .sendMessage(
+      payer.id,
+      "💸 " + requesterLabel + " requested " + amount + " GRAM from you (testnet).\nValid for 5 minutes.",
+      {
+        reply_markup: new InlineKeyboard().webApp(
+          "Review & sign",
+          payLink({ ...me, id: String(ctx.from.id) }, amount, watchId)
+        ),
+      }
+    )
+    .catch(() => null);
+
+  if (!sent) return ctx.reply("Could not send request to @" + username + ".");
+
+  if (payer.address) {
+    watchPayment(
+      {
+        senderAddr: payer.address,
+        senderId: payer.id,
+        senderLabel: "@" + username,
+        recipientId: ctx.from.id,
+        recipientAddr: me.address,
+        nano: String(Math.round(amount * 1e9)),
+        amount,
+        label: requesterLabel,
+        messageId: sent.message_id,
+      },
+      watchId
+    );
+  }
+  return ctx.reply("📩 Sent payment request (" + amount + " GRAM) to @" + username + ".");
 });
 
 bot.command("tip", async (ctx) => {
@@ -188,7 +243,6 @@ bot.on("message:web_app_data", async (ctx) => {
     const db = load();
     const existed = Boolean(db[ctx.from.id]);
 
-    // Make sure user only links a Testnet wallet (chain -3)
     if (String(data.chain) !== "-3") {
       return ctx.reply(
         "⚠️ Please connect a TON Testnet wallet (not Mainnet).\n" +
@@ -220,7 +274,6 @@ bot.on("message:web_app_data", async (ctx) => {
       { reply_markup: walletKeyboard(true) }
     );
 
-    // Notify any senders who were waiting for this user to link a wallet
     const uname = (savedUser.username ?? "").toLowerCase();
     const matchedInvites = popPendingInvitesFor(uname);
     for (const inv of matchedInvites) {
@@ -274,14 +327,15 @@ bot.start({
       { command: "start", description: "Link or change your wallet" },
       { command: "pair", description: "Connect your Even G2 glasses" },
       { command: "tip", description: "Send a tip: /tip @username 1" },
+      { command: "ask", description: "Request GRAM: /ask @username 2" },
       { command: "help", description: "Instructions" },
       { command: "wallet", description: "Show your linked wallet" },
       { command: "voicename", description: "Set the name used by voice" },
       { command: "unlink", description: "Remove your wallet" },
     ]);
-    await bot.api.setMyShortDescription("Send crypto tips on TON with one short command, or by voice from G2 glasses.");
+    await bot.api.setMyShortDescription("AI voice assistant & crypto tips on TON for Even G2 glasses.");
     await bot.api.setMyDescription(
-      "Jiko helps you send crypto tips on TON (testnet demo) with one short command, or by voice from your Even G2 glasses. Tap Start to link your wallet."
+      "Jiko is your AI voice assistant and non-custodial TON tip wallet on Even G2 glasses. Tap Start to link your wallet."
     );
   },
 });
