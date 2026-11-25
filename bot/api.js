@@ -15,7 +15,7 @@ import {
 } from "./core.js";
 
 const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3-turbo";
-const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "llama-3.3-70b-versatile";
+const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "openai/gpt-oss-20b";
 const TONCENTER_TX = "https://testnet.toncenter.com/api/v2/getTransactions";
 const TONCENTER_BAL = "https://testnet.toncenter.com/api/v2/getAddressBalance";
 const pending = new Map();
@@ -121,7 +121,7 @@ async function understandVoice(transcript) {
       body: JSON.stringify({
         model: GROQ_LLM_MODEL,
         temperature: 0.2,
-        max_tokens: 120,
+        max_tokens: 1024,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
