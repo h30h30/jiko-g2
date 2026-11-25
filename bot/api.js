@@ -13,6 +13,7 @@ import {
   createInviteDraft,
   getBotUsername,
 } from "./core.js";
+import { isNotionEnabled, saveNotionEntry, fetchRecentNotionEntries } from "./notion.js";
 
 const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3-turbo";
 const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "openai/gpt-oss-20b";
@@ -66,7 +67,6 @@ function wavFromPcm(pcm) {
   return Buffer.concat([h, pcm]);
 }
 
-// Speech-to-Text via Groq Whisper Large v3 Turbo
 async function transcribe(pcm) {
   if (!process.env.GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY");
   const t0 = Date.now();
@@ -96,19 +96,20 @@ async function transcribe(pcm) {
   return text;
 }
 
-// AI Assistant router via Groq LLM (with local regex fallback)
 async function understandVoice(transcript) {
   if (!process.env.GROQ_API_KEY) return parseCommand(transcript);
   const t0 = Date.now();
 
   const systemPrompt =
-    "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON crypto tip wallet.\n" +
+    "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON crypto tip wallet and Notion workspace.\n" +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
     '1) Sending money/tip: {"type":"tip","amount":<number>,"name":"<recipient name>"}\n' +
     '2) Requesting money from someone: {"type":"ask","amount":<number>,"name":"<payer name>"}\n' +
     '3) Checking wallet balance: {"type":"balance"}\n' +
-    '4) Checking recent transactions/activity: {"type":"history"}\n' +
-    '5) Any general question, calculation, translation, crypto info, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
+    '4) Checking recent TON transactions/activity: {"type":"history"}\n' +
+    '5) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
+    '6) Reading saved Notion notes or expense log: {"type":"notes"}\n' +
+    '7) Any general question, math calculation, translation, crypto info, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
     "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown, formatted for a tiny heads-up display.";
 
   try {
@@ -141,7 +142,10 @@ async function understandVoice(transcript) {
     if (parsed.type === "ask" && Number(parsed.amount) > 0 && parsed.name) {
       return { type: "ask", amount: Number(parsed.amount), name: String(parsed.name).trim() };
     }
-    if (parsed.type === "balance" || parsed.type === "history") {
+    if (parsed.type === "note" && parsed.content) {
+      return { type: "note", content: String(parsed.content).trim() };
+    }
+    if (parsed.type === "balance" || parsed.type === "history" || parsed.type === "notes") {
       return { type: parsed.type };
     }
     if (parsed.type === "answer" && parsed.reply) {
@@ -230,11 +234,13 @@ async function checkWatches(bot) {
       );
       continue;
     }
-    try {
+try {
       const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(w.senderAddr) + "&limit=10");
+      if (!r.ok) continue;
       const json = await r.json();
+      if (!json.ok || !Array.isArray(json.result)) continue;
       const targetCanon = canonicalAddr(w.recipientAddr);
-      const found = (json.result ?? []).some(
+      const found = json.result.some(
         (tx) =>
           tx.utime >= Math.floor(w.since / 1000) - 5 &&
           (tx.out_msgs ?? []).some(
@@ -245,7 +251,23 @@ async function checkWatches(bot) {
       );
       if (!found) continue;
       w.status = "sent";
-      await notify(bot, w, "✅ Sent " + w.amount + " GRAM to " + w.label + " (testnet).");
+
+      // Auto-log confirmed tip to Notion workspace
+      let notionSuffix = "";
+      if (isNotionEnabled()) {
+        try {
+          await saveNotionEntry({
+            kind: "tip",
+            title: `Tip: ${w.amount} GRAM -> ${w.label}`,
+            details: `From ${w.senderLabel} to ${w.label} · ${w.amount} GRAM (TON Testnet) · Logged automatically by Jiko`,
+          });
+          notionSuffix = "\n📒 Logged to Notion.";
+        } catch (e) {
+          console.error("NOTION LOG ERROR:", e.message);
+        }
+      }
+
+      await notify(bot, w, "✅ Sent " + w.amount + " GRAM to " + w.label + " (testnet)." + notionSuffix);
       if (w.recipientId && String(w.recipientId) !== String(w.senderId)) {
         await bot.api
           .sendMessage(
@@ -288,7 +310,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
         return res.end();
       }
       if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
-        return reply(res, 200, { ok: true, service: "jiko" });
+        return reply(res, 200, { ok: true, service: "jiko", notion: isNotionEnabled() });
       }
       if (req.method !== "POST") {
         res.writeHead(404);
@@ -374,8 +396,62 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: "Didn't get that.\nTry: send 1 gram to Alex,\nask Alex for 2 gram, or ask anything",
+              message: "Didn't get that.\nTry: send 1 gram to Alex,\nnote: call Ali, or ask anything",
             });
+          }
+
+          // Save voice note directly to Notion (100% hands-free)
+          if (cmd.type === "note") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, {
+                ok: false,
+                message: "Notion not configured.\nSet NOTION_API_KEY &\nNOTION_DATABASE_ID",
+              });
+            }
+            try {
+              const me = load()[senderId];
+              await saveNotionEntry({
+                kind: "note",
+                title: cmd.content,
+                details: `Voice note by ${userLabel(me)} via Even G2 glasses`,
+              });
+              const preview = cmd.content.length > 60 ? cmd.content.slice(0, 57) + "..." : cmd.content;
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                message: "Saved to Notion:\n" + preview,
+              });
+            } catch (e) {
+              console.error("NOTION NOTE ERROR:", e.message);
+              return reply(res, 200, {
+                ok: false,
+                message: "Could not save to Notion.\nCheck database connection.",
+              });
+            }
+          }
+
+          // Read recent Notion notes / expense log (100% hands-free)
+          if (cmd.type === "notes") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, {
+                ok: false,
+                message: "Notion not configured.\nSet NOTION_API_KEY &\nNOTION_DATABASE_ID",
+              });
+            }
+            try {
+              const msg = await fetchRecentNotionEntries(3);
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                message: msg,
+              });
+            } catch (e) {
+              console.error("NOTION READ ERROR:", e.message);
+              return reply(res, 200, {
+                ok: false,
+                message: "Could not read Notion.\nTry again.",
+              });
+            }
           }
 
           // General AI Assistant answer on G2 display
