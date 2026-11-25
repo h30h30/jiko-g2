@@ -15,6 +15,7 @@ import {
   addPendingInvite,
   popPendingInvitesFor,
 } from "./core.js";
+import { isNotionEnabled, saveNotionEntry } from "./notion.js";
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
@@ -26,8 +27,10 @@ const HELP =
   "1) Link your wallet: /start, then tap the wallet button (testnet wallet via TON Connect).\n" +
   "2) Pair your G2 glasses: send /pair and enter the 6-digit code in the Jiko companion app.\n" +
   "3) Speak naturally to your G2 glasses:\n" +
-  "   • \"send 1 gram to Alex\"\n" +
+  "   • \"send 1 gram to Alex\" (auto-logs to Notion)\n" +
   "   • \"ask Alex for 2 gram\"\n" +
+  "   • \"note: send pitch deck tomorrow\" (saves to Notion)\n" +
+  "   • \"show my notes\" (reads latest Notion log)\n" +
   "   • \"check my balance\" or \"last transactions\"\n" +
   "   • Or ask any quick question (math, TON info, etc.)\n\n" +
   "Commands:\n" +
@@ -35,6 +38,7 @@ const HELP =
   "/pair - get a code to connect your G2 glasses\n" +
   "/tip @user amount - send a tip (max 10 GRAM)\n" +
   "/ask @user amount - request GRAM from a friend\n" +
+  "/note text - save a quick note to Notion\n" +
   "/wallet - show your linked wallet\n" +
   "/voicename Name - set an easy name friends say to G2\n" +
   "/unlink - remove your wallet from Jiko\n" +
@@ -52,13 +56,13 @@ bot.command("start", async (ctx) => {
     save(db);
     return ctx.reply(
       "Welcome back! 🐦\nYour wallet: " + short(me.address) +
-        "\nSend /pair to connect your G2 glasses, /tip @username 1, or /help.",
+        "\nSend /pair to connect your G2 glasses, /tip @username 1, /note ..., or /help.",
       { reply_markup: walletKeyboard(true) }
     );
   }
   return ctx.reply(
     "Hi, I'm Jiko 🐦\n" +
-      "Your AI voice assistant & non-custodial TON tip wallet on Even G2 glasses.\n\n" +
+      "Your AI voice assistant, Notion workspace logger & non-custodial TON tip wallet on Even G2 glasses.\n\n" +
       "Tap the button below to link your testnet wallet. For instructions, see /help.",
     { reply_markup: walletKeyboard(false) }
   );
@@ -110,6 +114,26 @@ bot.command("voicename", async (ctx) => {
   me.alias = name;
   save(db);
   return ctx.reply("Voice name set: " + name + " ✅");
+});
+
+bot.command("note", async (ctx) => {
+  const text = (ctx.match ?? "").trim();
+  if (!text) return ctx.reply("Usage: /note Send pitch deck to Alex tomorrow");
+  if (!isNotionEnabled()) {
+    return ctx.reply("Notion is not configured on the server yet.");
+  }
+  try {
+    const author = ctx.from.username ? "@" + ctx.from.username : ctx.from.first_name || "user";
+    await saveNotionEntry({
+      kind: "note",
+      title: text,
+      details: `Saved from Telegram by ${author}`,
+    });
+    return ctx.reply("📒 Saved to Notion ✅\n" + text);
+  } catch (e) {
+    console.error("TELEGRAM NOTE ERROR:", e.message);
+    return ctx.reply("Could not save to Notion. Check your database connection.");
+  }
 });
 
 bot.command("ask", async (ctx) => {
@@ -328,14 +352,15 @@ bot.start({
       { command: "pair", description: "Connect your Even G2 glasses" },
       { command: "tip", description: "Send a tip: /tip @username 1" },
       { command: "ask", description: "Request GRAM: /ask @username 2" },
+      { command: "note", description: "Save a note to Notion" },
       { command: "help", description: "Instructions" },
       { command: "wallet", description: "Show your linked wallet" },
       { command: "voicename", description: "Set the name used by voice" },
       { command: "unlink", description: "Remove your wallet" },
     ]);
-    await bot.api.setMyShortDescription("AI voice assistant & crypto tips on TON for Even G2 glasses.");
+    await bot.api.setMyShortDescription("AI voice assistant, Notion notes & TON tips on Even G2 glasses.");
     await bot.api.setMyDescription(
-      "Jiko is your AI voice assistant and non-custodial TON tip wallet on Even G2 glasses. Tap Start to link your wallet."
+      "Jiko is your AI voice assistant, Notion workspace logger, and non-custodial TON tip wallet on Even G2 glasses. Tap Start to link your wallet."
     );
   },
 });
