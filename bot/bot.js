@@ -1,14 +1,22 @@
 import crypto from "node:crypto";
 import { Bot, Keyboard, InlineKeyboard } from "grammy";
 import { startApi, watchPayment, createPairCode } from "./api.js";
-import { PAGE, load, save, revokeUserSessions, short, payLink } from "./core.js";
+import {
+  PAGE,
+  load,
+  save,
+  revokeUserSessions,
+  short,
+  payLink,
+  getBotUsername,
+  setBotUsername,
+  createInviteDraft,
+  consumeInviteDraft,
+  addPendingInvite,
+  popPendingInvitesFor,
+} from "./core.js";
 
 const bot = new Bot(process.env.BOT_TOKEN);
-let botUsername = "jikppay_bot";
-
-// In-memory store for tips waiting on unregistered recipients (non-custodial, no funds moved)
-const inviteDrafts = new Map();
-const pendingInvites = [];
 
 const walletKeyboard = (linked) =>
   new Keyboard().webApp(linked ? "Change wallet" : "Link wallet", PAGE + "/").resized();
@@ -17,14 +25,17 @@ const HELP =
   "How Jiko works 🐦\n\n" +
   "1) Link your wallet: /start, then tap the wallet button (testnet wallet via TON Connect).\n" +
   "2) Pair your G2 glasses: send /pair and enter the 6-digit code in the Jiko companion app.\n" +
-  "3) Send a tip: /tip @username 1, or by voice from your G2 glasses.\n" +
-  "4) Tap “Review & sign” and approve in your wallet.\n\n" +
+  "3) On your glasses, tap and say:\n" +
+  "   • \"send 1 gram to Alex\"\n" +
+  "   • \"check my balance\"\n" +
+  "   • \"last transactions\"\n" +
+  "4) For tips, tap once on G2 to confirm, then approve in your wallet.\n\n" +
   "Commands:\n" +
   "/start - link or change your wallet\n" +
   "/pair - get a code to connect your G2 glasses\n" +
   "/tip @user amount - send a tip (max 10 GRAM)\n" +
   "/wallet - show your linked wallet\n" +
-  "/voicename Name - set the name friends say to the glasses\n" +
+  "/voicename Name - set an easy name friends say to G2\n" +
   "/unlink - remove your wallet from Jiko\n" +
   "/help - this message\n\n" +
   "Testnet only: no real money. Each tip signing request is valid for 5 minutes.";
@@ -113,16 +124,10 @@ bot.command("tip", async (ctx) => {
     ([, u]) => (u.username ?? "").toLowerCase() === username
   );
   if (!entry) {
-    const draftId = crypto.randomBytes(4).toString("hex");
-    inviteDrafts.set(draftId, {
-      senderId: ctx.from.id,
-      targetUsername: username,
-      amount,
-      exp: Date.now() + 600_000,
-    });
+    const draftId = createInviteDraft(ctx.from.id, username, amount);
     return ctx.reply(
       "@" + username + " hasn't linked a wallet yet.\n" +
-        "Ask them to open https://t.me/" + botUsername + " and press /start.\n\n" +
+        "Ask them to open https://t.me/" + getBotUsername() + " and press /start.\n\n" +
         "No funds move yet — tap below to get notified as soon as they join.",
       {
         reply_markup: new InlineKeyboard().text(
@@ -164,23 +169,16 @@ bot.command("tip", async (ctx) => {
 });
 
 bot.callbackQuery(/^wait:(.+)$/, async (ctx) => {
-  const draftId = ctx.match[1];
-  const draft = inviteDrafts.get(draftId);
-  inviteDrafts.delete(draftId);
+  const draft = consumeInviteDraft(ctx.match[1]);
   await ctx.answerCallbackQuery();
-  if (!draft || Date.now() > draft.exp) {
+  if (!draft) {
     return ctx.editMessageText("⌛ Invite prompt expired. Send /tip again.");
   }
-  pendingInvites.push({
-    senderId: draft.senderId,
-    targetUsername: draft.targetUsername,
-    amount: draft.amount,
-    exp: Date.now() + 86_400_000, // 24 hours
-  });
+  addPendingInvite(draft.senderId, draft.targetUsername, draft.amount);
   return ctx.editMessageText(
     "⏳ Saved! When @" + draft.targetUsername + " links their wallet within 24h, " +
       "I'll send you the signing button for " + draft.amount + " GRAM.\n\n" +
-      "Share this link with them:\nhttps://t.me/" + botUsername
+      "Share this link with them:\nhttps://t.me/" + getBotUsername()
   );
 });
 
@@ -209,58 +207,55 @@ bot.on("message:web_app_data", async (ctx) => {
     };
     db[ctx.from.id] = savedUser;
     save(db);
+
+    const voiceHint = !alias
+      ? "\n\n🎙 Tip: Set a short voice name with /voicename YourName so friends can tip you easily on G2."
+      : "";
+
     await ctx.reply(
-      (existed ? "Wallet updated ✅\n" : "Wallet linked ✅\n") + data.address +
+      (existed ? "Wallet updated ✅\n" : "Wallet linked ✅\n") +
+        data.address +
+        voiceHint +
         "\n\nSend /pair to connect your G2 glasses.",
       { reply_markup: walletKeyboard(true) }
     );
 
     // Notify any senders who were waiting for this user to link a wallet
     const uname = (savedUser.username ?? "").toLowerCase();
-    if (uname) {
-      const now = Date.now();
-      for (let i = pendingInvites.length - 1; i >= 0; i--) {
-        const inv = pendingInvites[i];
-        if (now > inv.exp) {
-          pendingInvites.splice(i, 1);
-          continue;
-        }
-        if (inv.targetUsername !== uname) continue;
-        pendingInvites.splice(i, 1);
+    const matchedInvites = popPendingInvitesFor(uname);
+    for (const inv of matchedInvites) {
+      const target = { ...savedUser, id: String(ctx.from.id) };
+      const watchId = crypto.randomBytes(8).toString("hex");
+      const sent = await bot.api
+        .sendMessage(
+          inv.senderId,
+          "🎉 @" + uname + " just linked their wallet!\n" +
+            "Ready to send your " + inv.amount + " GRAM tip? (Valid for 5 minutes)",
+          {
+            reply_markup: new InlineKeyboard().webApp(
+              "Review & sign",
+              payLink(target, inv.amount, watchId)
+            ),
+          }
+        )
+        .catch(() => null);
 
-        const target = { ...savedUser, id: String(ctx.from.id) };
-        const watchId = crypto.randomBytes(8).toString("hex");
-        const sent = await bot.api
-          .sendMessage(
-            inv.senderId,
-            "🎉 @" + uname + " just linked their wallet!\n" +
-              "Ready to send your " + inv.amount + " GRAM tip? (Valid for 5 minutes)",
-            {
-              reply_markup: new InlineKeyboard().webApp(
-                "Review & sign",
-                payLink(target, inv.amount, watchId)
-              ),
-            }
-          )
-          .catch(() => null);
-
-        const sender = db[inv.senderId];
-        if (sent && sender?.address) {
-          watchPayment(
-            {
-              senderAddr: sender.address,
-              senderId: inv.senderId,
-              senderLabel: sender.username ? "@" + sender.username : sender.first_name || "someone",
-              recipientId: target.id,
-              recipientAddr: target.address,
-              nano: String(Math.round(inv.amount * 1e9)),
-              amount: inv.amount,
-              label: "@" + uname,
-              messageId: sent.message_id,
-            },
-            watchId
-          );
-        }
+      const sender = db[inv.senderId];
+      if (sent && sender?.address) {
+        watchPayment(
+          {
+            senderAddr: sender.address,
+            senderId: inv.senderId,
+            senderLabel: sender.username ? "@" + sender.username : sender.first_name || "someone",
+            recipientId: target.id,
+            recipientAddr: target.address,
+            nano: String(Math.round(inv.amount * 1e9)),
+            amount: inv.amount,
+            label: "@" + uname,
+            messageId: sent.message_id,
+          },
+          watchId
+        );
       }
     }
   } catch (e) {
@@ -273,7 +268,7 @@ startApi(bot);
 
 bot.start({
   onStart: async (info) => {
-    botUsername = info.username;
+    setBotUsername(info.username);
     console.log("started as @" + info.username);
     await bot.api.setMyCommands([
       { command: "start", description: "Link or change your wallet" },

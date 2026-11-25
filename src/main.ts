@@ -281,11 +281,12 @@ bridge.onEvenHubEvent(async event => {
       if (!text) return await idle('Nothing heard')
       const cmd = await postJson('/command', { text })
       if (!cmd.ok) return await idle(cmd.message + '\n\nHeard: "' + text + '"')
-      if (cmd.type === 'balance') return await idle(cmd.message)
+      if (cmd.type === 'balance' || cmd.type === 'history') return await idle(cmd.message)
 
       pendingId = cmd.id
       state = 'confirming'
-      await show(cmd.summary + '\n\nTap = confirm\n2x Tap = cancel (8s)')
+      const actionLabel = cmd.type === 'invite' ? 'Tap = send invite' : 'Tap = confirm'
+      await show(cmd.summary + '\n\n' + actionLabel + '\n2x Tap = cancel (8s)')
       cancelTimer = setTimeout(() => {
         if (state === 'confirming') idle('Cancelled')
       }, 8000)
@@ -304,6 +305,8 @@ bridge.onEvenHubEvent(async event => {
       const id = pendingId
       const r = await postJson('/confirm', { id })
       if (!r.ok) return await idle(r.message)
+      if (r.type === 'invite') return await idle(r.message || 'Invite sent to Telegram!')
+
       state = 'waiting'
       await show('Sign in your wallet\n(see Telegram)\n\nTap to stop waiting')
       const startedAt = Date.now()

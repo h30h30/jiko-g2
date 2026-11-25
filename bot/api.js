@@ -10,6 +10,8 @@ import {
   saveSessions,
   short,
   canonicalAddr,
+  createInviteDraft,
+  getBotUsername,
 } from "./core.js";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
@@ -35,6 +37,14 @@ function getAuthUserId(req) {
 function userLabel(u) {
   if (!u) return "user";
   return u.username ? "@" + u.username : u.first_name || "user";
+}
+
+function timeAgo(utime) {
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - Number(utime || 0));
+  if (diff < 60) return "now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  return Math.floor(diff / 86400) + "d ago";
 }
 
 function wavFromPcm(pcm) {
@@ -99,6 +109,31 @@ async function fetchBalance(address) {
   if (!json.ok) throw new Error(json.error || "Toncenter error");
   console.log(`[TIMING] Toncenter balance: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
   return (Number(json.result) / 1e9).toFixed(2);
+}
+
+async function fetchHistory(address) {
+  const t0 = Date.now();
+  const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(address) + "&limit=6");
+  if (!r.ok) throw new Error("Toncenter " + r.status);
+  const json = await r.json();
+  if (!json.ok) throw new Error(json.error || "Toncenter error");
+  console.log(`[TIMING] Toncenter history: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+
+  const lines = [];
+  for (const tx of json.result ?? []) {
+    const out = (tx.out_msgs ?? []).find((m) => Number(m.value) > 0);
+    if (out) {
+      const amt = (Number(out.value) / 1e9).toFixed(2);
+      lines.push("-" + amt + " GRAM  (" + timeAgo(tx.utime) + ")");
+    } else if (tx.in_msg && Number(tx.in_msg.value) > 0) {
+      const amt = (Number(tx.in_msg.value) / 1e9).toFixed(2);
+      lines.push("+" + amt + " GRAM  (" + timeAgo(tx.utime) + ")");
+    }
+    if (lines.length >= 3) break;
+  }
+
+  if (!lines.length) return "No recent activity\n(testnet)";
+  return "Recent activity:\n" + lines.join("\n");
 }
 
 async function readBody(req, limit) {
@@ -286,7 +321,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: "Didn't get that.\nTry: send 1 gram to Alex\nor: check balance",
+              message: "Didn't get that.\nTry: send 1 gram to Alex,\ncheck balance, or last tips",
             });
           }
 
@@ -315,6 +350,31 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
+          // Recent transactions (100% hands-free, no phone needed)
+          if (cmd.type === "history") {
+            const me = load()[senderId];
+            if (!me?.address) {
+              return reply(res, 200, {
+                ok: false,
+                message: "No wallet linked.\nOpen Jiko bot and press /start",
+              });
+            }
+            try {
+              const msg = await fetchHistory(me.address);
+              return reply(res, 200, {
+                ok: true,
+                type: "history",
+                message: msg,
+              });
+            } catch (e) {
+              console.error("HISTORY ERROR:", e.message);
+              return reply(res, 200, {
+                ok: false,
+                message: "Could not read history.\nTry again.",
+              });
+            }
+          }
+
           // Tip command
           if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
           const user = findRecipient(cmd.name);
@@ -324,12 +384,28 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               message: 'Several matches for\n"' + cmd.name + '".\nSay the voice name.',
             });
           }
+
+          // Recipient has not linked a wallet yet -> offer one-tap Telegram invite from glasses
           if (!user) {
-            return reply(res, 200, { ok: false, message: 'No linked wallet for\n"' + cmd.name + '"' });
+            const id = crypto.randomBytes(8).toString("hex");
+            pending.set(id, {
+              kind: "invite",
+              senderId,
+              targetName: cmd.name,
+              amount: cmd.amount,
+              at: Date.now(),
+            });
+            return reply(res, 200, {
+              ok: true,
+              type: "invite",
+              id,
+              summary: 'No wallet for "' + cmd.name + '".\nSend invite (' + cmd.amount + " GRAM)?",
+            });
           }
+
           const id = crypto.randomBytes(8).toString("hex");
           const label = user.username ? "@" + user.username : user.first_name || cmd.name;
-          pending.set(id, { senderId, user, amount: cmd.amount, label, at: Date.now() });
+          pending.set(id, { kind: "tip", senderId, user, amount: cmd.amount, label, at: Date.now() });
           return reply(res, 200, {
             ok: true,
             type: "tip",
@@ -345,6 +421,30 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!p || p.senderId !== senderId || Date.now() - p.at > 60_000) {
             return reply(res, 200, { ok: false, message: "Expired" });
           }
+
+          // One-tap invite triggered from G2 glasses
+          if (p.kind === "invite") {
+            const cleanName = p.targetName.toLowerCase().replace(/^@/, "").replace(/\s+/g, "");
+            const draftId = createInviteDraft(senderId, cleanName, p.amount);
+            await bot.api.sendMessage(
+              senderId,
+              "@" + cleanName + " hasn't linked a wallet yet.\n" +
+                "Ask them to open https://t.me/" + getBotUsername() + " and press /start.\n\n" +
+                "No funds move yet — tap below to get notified as soon as they join.",
+              {
+                reply_markup: new InlineKeyboard().text(
+                  "🔔 Notify me when @" + cleanName + " links (24h)",
+                  "wait:" + draftId
+                ),
+              }
+            );
+            return reply(res, 200, {
+              ok: true,
+              type: "invite",
+              message: "Invite ready in Telegram!\nCheck Jiko bot for @" + cleanName,
+            });
+          }
+
           const sent = await bot.api.sendMessage(
             senderId,
             "Tip " + p.amount + " GRAM to " + p.label + "?\nValid for 5 minutes.",
@@ -366,7 +466,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               status: "waiting",
             });
           }
-          return reply(res, 200, { ok: true });
+          return reply(res, 200, { ok: true, type: "tip" });
         }
 
         if (req.url === "/status") {

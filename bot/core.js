@@ -5,6 +5,62 @@ export const PAGE = "https://h30h30.github.io/jiko-g2";
 const FILE = "registry.json";
 const SESSIONS_FILE = "sessions.json";
 
+let botUsername = "jikopay_bot";
+export const getBotUsername = () => botUsername;
+export const setBotUsername = (name) => {
+  if (name) botUsername = name;
+};
+
+// Shared in-memory store for unregistered recipient invites (used by both bot.js and api.js)
+const inviteDrafts = new Map();
+const pendingInvites = [];
+
+export function createInviteDraft(senderId, targetUsername, amount) {
+  const draftId = crypto.randomBytes(4).toString("hex");
+  inviteDrafts.set(draftId, {
+    senderId: String(senderId),
+    targetUsername: targetUsername.toLowerCase().replace(/^@/, ""),
+    amount,
+    exp: Date.now() + 600_000,
+  });
+  return draftId;
+}
+
+export function consumeInviteDraft(draftId) {
+  const draft = inviteDrafts.get(draftId);
+  inviteDrafts.delete(draftId);
+  if (!draft || Date.now() > draft.exp) return null;
+  return draft;
+}
+
+export function addPendingInvite(senderId, targetUsername, amount) {
+  pendingInvites.push({
+    senderId: String(senderId),
+    targetUsername: targetUsername.toLowerCase().replace(/^@/, ""),
+    amount,
+    exp: Date.now() + 86_400_000, // 24 hours
+  });
+}
+
+export function popPendingInvitesFor(username) {
+  const uname = (username ?? "").toLowerCase().replace(/^@/, "");
+  if (!uname) return [];
+  const now = Date.now();
+  const matched = [];
+  for (let i = pendingInvites.length - 1; i >= 0; i--) {
+    const inv = pendingInvites[i];
+    if (now > inv.exp) {
+      pendingInvites.splice(i, 1);
+      continue;
+    }
+    if (inv.targetUsername === uname) {
+      matched.push(inv);
+      pendingInvites.splice(i, 1);
+    }
+  }
+  return matched;
+}
+
 export const load = () => (fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, "utf8")) : {});
 export const save = (d) => fs.writeFileSync(FILE, JSON.stringify(d, null, 2));
 
@@ -46,12 +102,12 @@ export function canonicalAddr(addr) {
 
 const NUM = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, half: 0.5 };
 
-// Parses either a tip command ("send one gram to Alex") or a balance check ("check my balance")
+// Parses tip ("send 1 gram to Alex"), recent transactions ("last transactions"), or balance ("check balance")
 export function parseCommand(text) {
   const t = text.toLowerCase().replace(/[^a-z0-9.@_\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // 1) Check for tip command
+  // 1) Tip command
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
@@ -69,7 +125,15 @@ export function parseCommand(text) {
     }
   }
 
-  // 2) Check for wallet balance command
+  // 2) Recent transactions / activity command
+  if (
+    !/\b(send|tip|give|pay)\b/.test(t) &&
+    /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
+  ) {
+    return { type: "history" };
+  }
+
+  // 3) Wallet balance command
   if (
     !/\b(send|tip|give|pay)\b/.test(t) &&
     (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))
