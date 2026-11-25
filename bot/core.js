@@ -3,30 +3,81 @@ import crypto from "node:crypto";
 
 export const PAGE = "https://h30h30.github.io/jiko-g2";
 const FILE = "registry.json";
+const SESSIONS_FILE = "sessions.json";
 
 export const load = () => (fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, "utf8")) : {});
 export const save = (d) => fs.writeFileSync(FILE, JSON.stringify(d, null, 2));
+
+export const loadSessions = () =>
+  fs.existsSync(SESSIONS_FILE) ? JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8")) : {};
+export const saveSessions = (d) => fs.writeFileSync(SESSIONS_FILE, JSON.stringify(d, null, 2));
+
+export function revokeUserSessions(userId) {
+  const sessions = loadSessions();
+  let changed = false;
+  for (const [token, uid] of Object.entries(sessions)) {
+    if (String(uid) === String(userId)) {
+      delete sessions[token];
+      changed = true;
+    }
+  }
+  if (changed) saveSessions(sessions);
+}
+
 export const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
+
+// Normalises TON addresses (EQ/UQ/kQ/0Q or raw 0:hex) so they can be compared reliably
+export function canonicalAddr(addr) {
+  if (!addr || typeof addr !== "string") return "";
+  const s = addr.trim();
+  if (s.includes(":")) {
+    const [wc, hash] = s.split(":");
+    return `${Number(wc)}:${(hash ?? "").toLowerCase()}`;
+  }
+  try {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+    const buf = Buffer.from(b64, "base64");
+    if (buf.length !== 36) return s;
+    return `${buf.readInt8(1)}:${buf.subarray(2, 34).toString("hex")}`;
+  } catch {
+    return s;
+  }
+}
 
 const NUM = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, half: 0.5 };
 
-// "send one gram to Alex" -> { amount: 1, name: "alex" }
+// Parses either a tip command ("send one gram to Alex") or a balance check ("check my balance")
 export function parseCommand(text) {
   const t = text.toLowerCase().replace(/[^a-z0-9.@_\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+
+  // 1) Check for tip command
   const i = t.lastIndexOf(" to ");
-  if (i < 0) return null;
-  const left = t.slice(0, i);
-  const name = t.slice(i + 4).replace(/^@/, "").replace(/\.+$/, "").trim();
-  if (!/\b(send|tip|give|pay)\b/.test(left) || !name) return null;
-  let amount = null;
-  const d = left.match(/\d+(\.\d+)?/);
-  if (d) amount = Number(d[0]);
-  else {
-    for (const w of left.split(" ")) {
-      if (Object.hasOwn(NUM, w)) { amount = NUM[w]; break; }
+  if (i >= 0) {
+    const left = t.slice(0, i);
+    const name = t.slice(i + 4).replace(/^@/, "").replace(/\.+$/, "").trim();
+    if (/\b(send|tip|give|pay)\b/.test(left) && name) {
+      let amount = null;
+      const d = left.match(/\d+(\.\d+)?/);
+      if (d) amount = Number(d[0]);
+      else {
+        for (const w of left.split(" ")) {
+          if (Object.hasOwn(NUM, w)) { amount = NUM[w]; break; }
+        }
+      }
+      if (amount > 0) return { type: "tip", amount, name };
     }
   }
-  return amount > 0 ? { amount, name } : null;
+
+  // 2) Check for wallet balance command
+  if (
+    !/\b(send|tip|give|pay)\b/.test(t) &&
+    (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))
+  ) {
+    return { type: "balance" };
+  }
+
+  return null;
 }
 
 function lev(a, b) {
@@ -73,13 +124,17 @@ export function findRecipient(name) {
   return scored[0].user;
 }
 
-export function payLink(user, amount) {
-  const rid = crypto.randomBytes(4).toString("hex");
+export function payLink(user, amount, watchId = "") {
+  const rid = watchId || crypto.randomBytes(8).toString("hex");
   const exp = Math.floor(Date.now() / 1000) + 300;
   const name = user.username ?? user.first_name ?? "friend";
-  return (
+  let url =
     PAGE + "/pay.html?to=" + encodeURIComponent(user.address) +
     "&amount=" + amount + "&name=" + encodeURIComponent(name) +
-    "&r=" + rid + "&exp=" + exp
-  );
+    "&r=" + rid + "&exp=" + exp;
+  const api = (process.env.PUBLIC_API_URL || "").trim().replace(/\/$/, "");
+  if (api && watchId) {
+    url += "&wid=" + encodeURIComponent(watchId) + "&api=" + encodeURIComponent(api);
+  }
+  return url;
 }

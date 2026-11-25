@@ -1,13 +1,13 @@
 {
-  "package_id": "com.example.evenhubminimal",
+  "package_id": "com.jiko.g2",
   "edition": "202601",
-  "name": "Even Hub Minimal",
+  "name": "Jiko",
   "version": "0.1.0",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",
   "permissions": [
-  { "name": "g2-microphone", "desc": "Voice commands to send tips hands-free." }
-],
+    { "name": "g2-microphone", "desc": "Voice commands to send tips and check wallet balance hands-free." }
+  ],
   "supported_languages": ["en"]
 }

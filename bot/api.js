@@ -1,17 +1,40 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { InlineKeyboard } from "grammy";
-import { parseCommand, findRecipient, payLink, load } from "./core.js";
+import {
+  parseCommand,
+  findRecipient,
+  payLink,
+  load,
+  loadSessions,
+  saveSessions,
+  short,
+  canonicalAddr,
+} from "./core.js";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
-const TONCENTER = "https://testnet.toncenter.com/api/v2/getTransactions";
+const TONCENTER_TX = "https://testnet.toncenter.com/api/v2/getTransactions";
+const TONCENTER_BAL = "https://testnet.toncenter.com/api/v2/getAddressBalance";
 const pending = new Map();
 const watching = new Map();
+const pairCodes = new Map();
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-jiko-token");
+}
+
+function getAuthUserId(req) {
+  const token = req.headers["x-jiko-token"];
+  if (!token || typeof token !== "string") return null;
+  const sessions = loadSessions();
+  return sessions[token] ?? null;
+}
+
+function userLabel(u) {
+  if (!u) return "user";
+  return u.username ? "@" + u.username : u.first_name || "user";
 }
 
 function wavFromPcm(pcm) {
@@ -33,6 +56,7 @@ function wavFromPcm(pcm) {
 }
 
 async function transcribe(pcm) {
+  const t0 = Date.now();
   const wav = wavFromPcm(pcm);
   const url =
     "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
@@ -57,10 +81,24 @@ async function transcribe(pcm) {
   });
   if (!res.ok) throw new Error("Gemini " + res.status + ": " + (await res.text()).slice(0, 200));
   const json = await res.json();
-  return (json.candidates?.[0]?.content?.parts ?? [])
+  const text = (json.candidates?.[0]?.content?.parts ?? [])
     .map((p) => p.text ?? "")
     .join("")
     .trim();
+  console.log(
+    `[TIMING] Gemini STT: ${((Date.now() - t0) / 1000).toFixed(2)}s (${(pcm.length / 32000).toFixed(1)}s audio)`
+  );
+  return text;
+}
+
+async function fetchBalance(address) {
+  const t0 = Date.now();
+  const r = await fetch(TONCENTER_BAL + "?address=" + encodeURIComponent(address));
+  if (!r.ok) throw new Error("Toncenter " + r.status);
+  const json = await r.json();
+  if (!json.ok) throw new Error(json.error || "Toncenter error");
+  console.log(`[TIMING] Toncenter balance: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+  return (Number(json.result) / 1e9).toFixed(2);
 }
 
 async function readBody(req, limit) {
@@ -106,12 +144,17 @@ async function checkWatches(bot) {
       continue;
     }
     try {
-      const r = await fetch(TONCENTER + "?address=" + encodeURIComponent(w.senderAddr) + "&limit=10");
+      const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(w.senderAddr) + "&limit=10");
       const json = await r.json();
+      const targetCanon = canonicalAddr(w.recipientAddr);
       const found = (json.result ?? []).some(
         (tx) =>
           tx.utime >= Math.floor(w.since / 1000) - 5 &&
-          (tx.out_msgs ?? []).some((m) => String(m.value) === w.nano)
+          (tx.out_msgs ?? []).some(
+            (m) =>
+              String(m.value) === w.nano &&
+              (!targetCanon || canonicalAddr(m.destination) === targetCanon)
+          )
       );
       if (!found) continue;
       w.status = "sent";
@@ -130,14 +173,26 @@ async function checkWatches(bot) {
   }
 }
 
-// used by the /tip command in bot.js
-export function watchPayment(w) {
-  const id = crypto.randomBytes(4).toString("hex");
+// used by /pair in bot.js
+export function createPairCode(userId) {
+  const now = Date.now();
+  for (const [k, v] of pairCodes) {
+    if (now > v.exp) pairCodes.delete(k);
+  }
+  const code = String(crypto.randomInt(100000, 1000000));
+  pairCodes.set(code, { userId: String(userId), exp: now + 300_000 });
+  return code;
+}
+
+// used by /tip and pending invites in bot.js
+export function watchPayment(w, customId) {
+  const id = customId || crypto.randomBytes(8).toString("hex");
   watching.set(id, { ...w, since: Date.now(), status: "waiting" });
   return id;
 }
 
-export function startApi(bot, port = 8787) {
+export function startApi(bot, port = Number(process.env.PORT) || 8787) {
+  const host = process.env.HOST || "0.0.0.0";
   setInterval(() => checkWatches(bot), 4000);
 
   http
@@ -147,11 +202,79 @@ export function startApi(bot, port = 8787) {
         res.writeHead(204);
         return res.end();
       }
+      if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
+        return reply(res, 200, { ok: true, service: "jiko" });
+      }
       if (req.method !== "POST") {
         res.writeHead(404);
         return res.end();
       }
       try {
+        if (req.url === "/cancel") {
+          const { id } = JSON.parse((await readBody(req, 10_000)).toString() || "{}");
+          const w = watching.get(id);
+          if (w && w.status === "waiting") {
+            w.status = "cancelled";
+            await notify(bot, w, "❌ Tip cancelled in wallet.");
+          }
+          return reply(res, 200, { ok: true });
+        }
+
+        if (req.url === "/pair") {
+          const { code } = JSON.parse((await readBody(req, 10_000)).toString() || "{}");
+          const clean = String(code ?? "").replace(/\s+/g, "");
+          const entry = pairCodes.get(clean);
+          if (!entry || Date.now() > entry.exp) {
+            pairCodes.delete(clean);
+            return reply(res, 200, { ok: false, message: "Invalid or expired code. Send /pair in Telegram." });
+          }
+          pairCodes.delete(clean);
+          const me = load()[entry.userId];
+          if (!me?.address) {
+            return reply(res, 200, { ok: false, message: "Wallet not linked. Send /start in Telegram first." });
+          }
+          const token = crypto.randomBytes(16).toString("hex");
+          const sessions = loadSessions();
+          sessions[token] = entry.userId;
+          saveSessions(sessions);
+          return reply(res, 200, {
+            ok: true,
+            token,
+            label: userLabel(me),
+            wallet: short(me.address),
+          });
+        }
+
+        if (req.url === "/me") {
+          const senderId = getAuthUserId(req);
+          if (!senderId) return reply(res, 401, { ok: false, error: "Not paired" });
+          const me = load()[senderId];
+          if (!me?.address) return reply(res, 401, { ok: false, error: "Wallet unlinked" });
+          return reply(res, 200, {
+            ok: true,
+            label: userLabel(me),
+            wallet: short(me.address),
+          });
+        }
+
+        if (req.url === "/unpair") {
+          const token = req.headers["x-jiko-token"];
+          if (token && typeof token === "string") {
+            const sessions = loadSessions();
+            if (sessions[token]) {
+              delete sessions[token];
+              saveSessions(sessions);
+            }
+          }
+          return reply(res, 200, { ok: true });
+        }
+
+        // All endpoints below require a paired glasses session
+        const senderId = getAuthUserId(req);
+        if (!senderId) {
+          return reply(res, 401, { ok: false, error: "Not paired" });
+        }
+
         if (req.url === "/voice") {
           const pcm = await readBody(req, 3_000_000);
           return reply(res, 200, { text: await transcribe(pcm) });
@@ -161,8 +284,38 @@ export function startApi(bot, port = 8787) {
           const { text } = JSON.parse((await readBody(req, 10_000)).toString() || "{}");
           const cmd = parseCommand(text ?? "");
           if (!cmd) {
-            return reply(res, 200, { ok: false, message: "Didn't get that.\nTry: send 1 gram to Alex" });
+            return reply(res, 200, {
+              ok: false,
+              message: "Didn't get that.\nTry: send 1 gram to Alex\nor: check balance",
+            });
           }
+
+          // Balance check (100% hands-free, no phone needed)
+          if (cmd.type === "balance") {
+            const me = load()[senderId];
+            if (!me?.address) {
+              return reply(res, 200, {
+                ok: false,
+                message: "No wallet linked.\nOpen Jiko bot and press /start",
+              });
+            }
+            try {
+              const bal = await fetchBalance(me.address);
+              return reply(res, 200, {
+                ok: true,
+                type: "balance",
+                message: "Balance: " + bal + " GRAM\nWallet: " + short(me.address) + "\n(testnet)",
+              });
+            } catch (e) {
+              console.error("BALANCE ERROR:", e.message);
+              return reply(res, 200, {
+                ok: false,
+                message: "Could not read balance.\nTry again.",
+              });
+            }
+          }
+
+          // Tip command
           if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
           const user = findRecipient(cmd.name);
           if (user?.ambiguous) {
@@ -174,11 +327,12 @@ export function startApi(bot, port = 8787) {
           if (!user) {
             return reply(res, 200, { ok: false, message: 'No linked wallet for\n"' + cmd.name + '"' });
           }
-          const id = crypto.randomBytes(4).toString("hex");
+          const id = crypto.randomBytes(8).toString("hex");
           const label = user.username ? "@" + user.username : user.first_name || cmd.name;
-          pending.set(id, { user, amount: cmd.amount, label, at: Date.now() });
+          pending.set(id, { senderId, user, amount: cmd.amount, label, at: Date.now() });
           return reply(res, 200, {
             ok: true,
+            type: "tip",
             id,
             summary: "Send " + cmd.amount + " GRAM to\n" + label + "?",
           });
@@ -188,21 +342,22 @@ export function startApi(bot, port = 8787) {
           const { id } = JSON.parse((await readBody(req, 10_000)).toString() || "{}");
           const p = pending.get(id);
           pending.delete(id);
-          if (!p || Date.now() - p.at > 60_000) return reply(res, 200, { ok: false, message: "Expired" });
-          const senderId = process.env.DEV_USER_ID;
-          if (!senderId) return reply(res, 200, { ok: false, message: "Set DEV_USER_ID in .env" });
+          if (!p || p.senderId !== senderId || Date.now() - p.at > 60_000) {
+            return reply(res, 200, { ok: false, message: "Expired" });
+          }
           const sent = await bot.api.sendMessage(
             senderId,
             "Tip " + p.amount + " GRAM to " + p.label + "?\nValid for 5 minutes.",
-            { reply_markup: new InlineKeyboard().webApp("Review & sign", payLink(p.user, p.amount)) }
+            { reply_markup: new InlineKeyboard().webApp("Review & sign", payLink(p.user, p.amount, id)) }
           );
           const me = load()[senderId];
           if (me?.address) {
             watching.set(id, {
               senderAddr: me.address,
               senderId,
-              senderLabel: me.username ? "@" + me.username : me.first_name || "someone",
+              senderLabel: userLabel(me),
               recipientId: p.user.id,
+              recipientAddr: p.user.address,
               nano: String(Math.round(p.amount * 1e9)),
               amount: p.amount,
               label: p.label,
@@ -217,10 +372,13 @@ export function startApi(bot, port = 8787) {
         if (req.url === "/status") {
           const { id } = JSON.parse((await readBody(req, 10_000)).toString() || "{}");
           const w = watching.get(id);
+          if (!w || String(w.senderId) !== String(senderId)) {
+            return reply(res, 200, { status: "unknown" });
+          }
           return reply(res, 200, {
-            status: w?.status ?? "unknown",
-            amount: w?.amount,
-            label: w?.label,
+            status: w.status,
+            amount: w.amount,
+            label: w.label,
           });
         }
 
@@ -231,5 +389,5 @@ export function startApi(bot, port = 8787) {
         reply(res, 500, { error: String(e.message) });
       }
     })
-    .listen(port, "127.0.0.1", () => console.log("API on http://127.0.0.1:" + port));
+    .listen(port, host, () => console.log("API on http://127.0.0.1:" + port));
 }

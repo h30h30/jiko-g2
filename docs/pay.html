@@ -1,51 +1,184 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>Jiko Pay</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+  <script src="https://unpkg.com/@tonconnect/ui@2/dist/tonconnect-ui.min.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #16161a);
+      --card: var(--tg-theme-secondary-bg-color, #232329);
+      --text: var(--tg-theme-text-color, #f4f4f6);
+      --hint: var(--tg-theme-hint-color, #9ca3af);
+      --btn: var(--tg-theme-button-color, #10b981);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --border: rgba(255, 255, 255, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .card {
+      width: 100%;
+      max-width: 360px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px 20px;
+      text-align: center;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      margin-bottom: 14px;
+    }
+    .amount {
+      font-size: 32px;
+      font-weight: 800;
+      margin: 0 0 4px;
+      letter-spacing: -0.5px;
+    }
+    .recipient {
+      margin: 0 0 18px;
+      font-size: 15px;
+      color: var(--hint);
+    }
+    .recipient b { color: var(--text); }
+    #ton-connect {
+      display: flex;
+      justify-content: center;
+      margin: 0 0 18px;
+    }
+    button#pay {
+      width: 100%;
+      padding: 14px 16px;
+      border: none;
+      border-radius: 12px;
+      background: var(--btn);
+      color: var(--btn-text);
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button#pay:disabled { opacity: 0.4; cursor: not-allowed; }
+    button#close-btn {
+      width: 100%;
+      padding: 12px 16px;
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: transparent;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: none;
+    }
+    .result {
+      margin: 14px 0 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.45;
+      display: none;
+    }
+    .result.show { display: block; }
+    .result.ok { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+    .result.err { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+    .result.info { background: rgba(255, 255, 255, 0.08); color: var(--hint); }
+  </style>
 </head>
-<body style="font-family:sans-serif;padding:16px">
-  <h2>Confirm payment</h2>
-  <div id="ton-connect"></div>
-  <p id="info"></p>
-  <button id="pay" disabled style="padding:10px 16px">Send</button>
-  <p id="result"></p>
+<body>
+  <div class="card">
+    <div class="pill">JIKO PAY · TESTNET</div>
+    <p id="amount-text" class="amount">—</p>
+    <p id="recipient-text" class="recipient"></p>
+    <div id="ton-connect"></div>
+    <button id="pay" disabled>Confirm & Sign</button>
+    <div id="result" class="result"></div>
+    <button id="close-btn">Close</button>
+  </div>
+
   <script>
     const p = new URLSearchParams(location.search);
     const to = p.get('to');
     const amount = Number(p.get('amount'));
-    const name = p.get('name') || '';
+    const name = p.get('name') || 'friend';
     const rid = p.get('r') || '';
     const exp = Number(p.get('exp')) || 0;
-    const tg = window.Telegram && window.Telegram.WebApp;
-    if (tg) tg.ready();
+    const api = p.get('api') || '';
+    const wid = p.get('wid') || '';
 
-    const info = document.getElementById('info');
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (tg) { tg.ready(); tg.expand(); }
+
+    const amountEl = document.getElementById('amount-text');
+    const recipientEl = document.getElementById('recipient-text');
     const out = document.getElementById('result');
     const btn = document.getElementById('pay');
+    const closeBtn = document.getElementById('close-btn');
+
     const now = () => Math.floor(Date.now() / 1000);
     let used = false;
     try { used = localStorage.getItem('used:' + rid) === '1'; } catch (e) {}
 
-    info.textContent = 'Send ' + amount + ' GRAM to @' + name + ' (testnet)';
+    function showResult(text, kind) {
+      out.textContent = text;
+      out.className = 'result show ' + kind;
+    }
+
+    amountEl.textContent = (amount > 0 ? amount : '?') + ' GRAM';
+    recipientEl.innerHTML = 'to <b>' + (name.startsWith('@') ? name : '@' + name) + '</b>';
+
     const invalid = () => !rid || !exp || !to || !(amount > 0);
     const locked = () => invalid() || used || now() > exp;
-    if (invalid()) out.textContent = 'Invalid request link.';
-    else if (used) out.textContent = 'This request was already used.';
-    else if (now() > exp) out.textContent = 'This request expired. Ask the bot for a new one.';
+
+    if (invalid()) showResult('Invalid payment link.', 'err');
+    else if (used) showResult('This request was already used.', 'info');
+    else if (now() > exp) showResult('This request expired. Send a new tip from Jiko.', 'err');
 
     const ui = new TON_CONNECT_UI.TonConnectUI({
       manifestUrl: 'https://raw.githubusercontent.com/h30h30/jiko-g2/main/docs/tonconnect-manifest-v2.json',
       buttonRootId: 'ton-connect'
     });
-    ui.onStatusChange(w => { btn.disabled = !w || locked(); });
+
+    ui.onStatusChange(w => {
+      if (!w) {
+        btn.disabled = true;
+        return;
+      }
+      if (String(w.account.chain) !== '-3') {
+        btn.disabled = true;
+        showResult('⚠️ Please switch your wallet to TON Testnet.', 'err');
+        return;
+      }
+      if (!locked()) out.className = 'result';
+      btn.disabled = locked();
+    });
+
+    closeBtn.onclick = () => { if (tg) tg.close(); };
 
     btn.onclick = async () => {
       if (locked()) return;
       btn.disabled = true;
+      showResult('Waiting for wallet approval...', 'info');
       try {
         await ui.sendTransaction({
           validUntil: exp,
@@ -54,9 +187,17 @@
         });
         try { localStorage.setItem('used:' + rid, '1'); } catch (e) {}
         used = true;
-        out.textContent = 'Sent ✅ Check your wallet.';
+        showResult('✅ Transaction sent! You can close this window.', 'ok');
+        if (tg) closeBtn.style.display = 'block';
       } catch (e) {
-        out.textContent = 'Cancelled or failed: ' + (e.message || e);
+        showResult('❌ Cancelled or rejected in wallet.', 'err');
+        if (api && wid) {
+          fetch(api + '/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: wid })
+          }).catch(() => {});
+        }
         btn.disabled = locked();
       }
     };

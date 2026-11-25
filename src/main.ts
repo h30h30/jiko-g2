@@ -6,7 +6,11 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 
-const API = 'http://127.0.0.1:8787'
+const API =
+  (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ||
+  'http://127.0.0.1:8787'
+const TOKEN_KEY = 'jiko_token'
+const MAX_LISTEN_MS = 15_000
 
 const bridge = await waitForEvenAppBridge()
 
@@ -20,7 +24,7 @@ const mainText = new TextContainerProperty({
   paddingLength: 4,
   containerID: 1,
   containerName: 'main',
-  content: 'Jiko\nTap to talk',
+  content: 'Jiko\nStarting...',
   isEventCapture: 1,
 })
 
@@ -36,32 +40,168 @@ const show = (text: string) =>
     new TextContainerUpgrade({ containerID: 1, containerName: 'main', content: text }),
   )
 
+// Companion UI elements (in root index.html)
+const pairView = document.getElementById('pair-view')
+const pairedView = document.getElementById('paired-view')
+const codeInput = document.getElementById('code-input') as HTMLInputElement | null
+const pairBtn = document.getElementById('pair-btn') as HTMLButtonElement | null
+const pairMsg = document.getElementById('pair-msg')
+const userInfo = document.getElementById('user-info')
+const unpairBtn = document.getElementById('unpair-btn') as HTMLButtonElement | null
+
+let token = ''
+try {
+  token = localStorage.getItem(TOKEN_KEY) || ''
+} catch {
+  token = ''
+}
+
+function saveToken(t: string) {
+  token = t
+  try {
+    if (t) localStorage.setItem(TOKEN_KEY, t)
+    else localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function renderUnpaired(errorText = '') {
+  pairView?.classList.remove('hidden')
+  pairedView?.classList.add('hidden')
+  if (pairMsg) pairMsg.textContent = errorText
+}
+
+function renderPaired(label: string, wallet: string) {
+  pairView?.classList.add('hidden')
+  pairedView?.classList.remove('hidden')
+  if (userInfo) userInfo.textContent = label + ' · ' + wallet + ' (testnet)'
+  if (pairMsg) pairMsg.textContent = ''
+}
+
+class AuthError extends Error {}
+
+async function post(path: string, body: BodyInit, type: string) {
+  const headers: Record<string, string> = { 'Content-Type': type }
+  if (token) headers['x-jiko-token'] = token
+  const res = await fetch(API + path, { method: 'POST', headers, body })
+  const data = await res.json()
+  if (res.status === 401) throw new AuthError(data.error || 'Not paired')
+  if (!res.ok) throw new Error(data.error || String(res.status))
+  return data
+}
+const postJson = (path: string, obj: unknown) => post(path, JSON.stringify(obj), 'application/json')
+
 // A single tap arrives with eventType undefined (protobuf omits 0), so it counts as CLICK.
 function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeList | null {
   if (!envelope) return null
   return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
 }
 
-async function post(path: string, body: BodyInit, type: string) {
-  const res = await fetch(API + path, { method: 'POST', headers: { 'Content-Type': type }, body })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error || String(res.status))
-  return data
-}
-const postJson = (path: string, obj: unknown) => post(path, JSON.stringify(obj), 'application/json')
-
 type State = 'idle' | 'listening' | 'busy' | 'confirming' | 'waiting'
 let state: State = 'idle'
 let parts: Uint8Array[] = []
 let pendingId = ''
 let cancelTimer: ReturnType<typeof setTimeout> | undefined
+let listenTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearTimers() {
+  if (cancelTimer) {
+    clearTimeout(cancelTimer)
+    cancelTimer = undefined
+  }
+  if (listenTimer) {
+    clearTimeout(listenTimer)
+    listenTimer = undefined
+  }
+}
 
 const idle = async (text: string) => {
   state = 'idle'
   pendingId = ''
-  if (cancelTimer) clearTimeout(cancelTimer)
+  clearTimers()
   await show(text + '\n\nTap to talk')
 }
+
+async function handleExpiredSession() {
+  saveToken('')
+  state = 'idle'
+  pendingId = ''
+  clearTimers()
+  renderUnpaired('Session expired. Send /pair in Telegram.')
+  await show('Jiko\nPair in phone app\nSend /pair to bot')
+}
+
+async function initSession() {
+  if (!token) {
+    renderUnpaired()
+    await show('Jiko\nPair in phone app\nSend /pair to bot')
+    return
+  }
+  try {
+    const me = await postJson('/me', {})
+    renderPaired(me.label, me.wallet)
+    await show('Jiko\nTap to talk')
+  } catch (e) {
+    if (e instanceof AuthError) {
+      await handleExpiredSession()
+    } else {
+      console.error(e)
+      renderUnpaired('Cannot reach Jiko server.')
+      await show('Jiko\nServer offline')
+    }
+  }
+}
+
+async function doPair() {
+  const code = (codeInput?.value || '').trim()
+  if (!code) {
+    if (pairMsg) pairMsg.textContent = 'Enter the 6-digit code from Telegram.'
+    return
+  }
+  if (pairBtn) pairBtn.disabled = true
+  if (pairMsg) pairMsg.textContent = 'Pairing...'
+  try {
+    const res = await postJson('/pair', { code })
+    if (!res.ok) {
+      if (pairMsg) pairMsg.textContent = res.message || 'Pairing failed.'
+      return
+    }
+    saveToken(res.token)
+    if (codeInput) codeInput.value = ''
+    renderPaired(res.label, res.wallet)
+    await idle('Paired! (' + res.label + ')')
+  } catch (e) {
+    console.error(e)
+    if (pairMsg) pairMsg.textContent = 'Cannot reach Jiko server.'
+  } finally {
+    if (pairBtn) pairBtn.disabled = false
+  }
+}
+
+pairBtn?.addEventListener('click', () => {
+  void doPair()
+})
+
+codeInput?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') void doPair()
+})
+
+unpairBtn?.addEventListener('click', async () => {
+  try {
+    await postJson('/unpair', {})
+  } catch {
+    // ignore network errors on unpair
+  }
+  saveToken('')
+  state = 'idle'
+  pendingId = ''
+  clearTimers()
+  renderUnpaired()
+  await show('Jiko\nPair in phone app\nSend /pair to bot')
+})
+
+await initSession()
 
 bridge.onEvenHubEvent(async event => {
   if (event.audioEvent) {
@@ -73,13 +213,25 @@ bridge.onEvenHubEvent(async event => {
   const textType = eventTypeOf(event.textEvent)
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-    if (cancelTimer) clearTimeout(cancelTimer)
+    if (state === 'busy') return
+    clearTimers()
+    if (state === 'idle') {
+      await bridge.audioControl(false)
+      bridge.shutDownPageContainer(1)
+      return
+    }
     await bridge.audioControl(false)
-    bridge.shutDownPageContainer(1)
+    parts = []
+    await idle('Cancelled')
     return
   }
 
   if (sysType !== OsEventTypeList.CLICK_EVENT && textType !== OsEventTypeList.CLICK_EVENT) return
+
+  if (!token) {
+    await show('Jiko\nNot paired yet.\nEnter /pair code\nin phone app')
+    return
+  }
 
   if (state === 'waiting') {
     await idle('Stopped waiting')
@@ -92,16 +244,31 @@ bridge.onEvenHubEvent(async event => {
     state = 'listening'
     parts = []
     await bridge.audioControl(true)
-    await show('Listening...\nTap to stop')
+    await show('Listening...\nTap to stop (max 15s)')
+    listenTimer = setTimeout(() => {
+      if (state === 'listening') {
+        void (async () => {
+          await bridge.audioControl(false)
+          parts = []
+          await idle('No command heard.\n(15s limit reached)')
+        })()
+      }
+    }, MAX_LISTEN_MS)
     return
   }
 
   if (state === 'listening') {
+    clearTimers()
     state = 'busy'
     await bridge.audioControl(false)
-    await show('Thinking...')
 
     const total = parts.reduce((n, p) => n + p.length, 0)
+    if (total < 3200) {
+      return await idle('Too short.\nTap, speak, then tap again.')
+    }
+
+    await show('Thinking...')
+
     const pcm = new Uint8Array(total)
     let offset = 0
     for (const p of parts) {
@@ -114,13 +281,16 @@ bridge.onEvenHubEvent(async event => {
       if (!text) return await idle('Nothing heard')
       const cmd = await postJson('/command', { text })
       if (!cmd.ok) return await idle(cmd.message + '\n\nHeard: "' + text + '"')
+      if (cmd.type === 'balance') return await idle(cmd.message)
+
       pendingId = cmd.id
       state = 'confirming'
-      await show(cmd.summary + '\n\nTap = confirm\n(auto-cancel in 8 s)')
+      await show(cmd.summary + '\n\nTap = confirm\n2x Tap = cancel (8s)')
       cancelTimer = setTimeout(() => {
         if (state === 'confirming') idle('Cancelled')
       }, 8000)
     } catch (e) {
+      if (e instanceof AuthError) return await handleExpiredSession()
       console.error(e)
       await idle('Error\n(see console)')
     }
@@ -128,8 +298,8 @@ bridge.onEvenHubEvent(async event => {
   }
 
   if (state === 'confirming') {
+    clearTimers()
     state = 'busy'
-    if (cancelTimer) clearTimeout(cancelTimer)
     try {
       const id = pendingId
       const r = await postJson('/confirm', { id })
@@ -141,11 +311,13 @@ bridge.onEvenHubEvent(async event => {
         await new Promise(res => setTimeout(res, 3000))
         if ((state as State) !== 'waiting') return
         const s = await postJson('/status', { id })
-        if (s.status === 'sent') return await idle('Sent ✅\n' + s.amount + ' GRAM to ' + s.label)
+        if (s.status === 'sent') return await idle('Sent!\n' + s.amount + ' GRAM to ' + s.label)
+        if (s.status === 'cancelled') return await idle('Cancelled in wallet')
         if (s.status === 'expired' || s.status === 'unknown') break
       }
       if ((state as State) === 'waiting') await idle('Not signed in time')
     } catch (e) {
+      if (e instanceof AuthError) return await handleExpiredSession()
       console.error(e)
       await idle('Error\n(see console)')
     }
