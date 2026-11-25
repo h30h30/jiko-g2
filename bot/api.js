@@ -14,7 +14,8 @@ import {
   getBotUsername,
 } from "./core.js";
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3-turbo";
+const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "llama-3.3-70b-versatile";
 const TONCENTER_TX = "https://testnet.toncenter.com/api/v2/getTransactions";
 const TONCENTER_BAL = "https://testnet.toncenter.com/api/v2/getAddressBalance";
 const pending = new Map();
@@ -65,51 +66,44 @@ function wavFromPcm(pcm) {
   return Buffer.concat([h, pcm]);
 }
 
+// Speech-to-Text via Groq Whisper Large v3 Turbo
 async function transcribe(pcm) {
+  if (!process.env.GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY");
   const t0 = Date.now();
   const wav = wavFromPcm(pcm);
-  const url =
-    "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
-  const res = await fetch(url, {
+
+  const form = new FormData();
+  form.append("file", new Blob([wav], { type: "audio/wav" }), "audio.wav");
+  form.append("model", GROQ_STT_MODEL);
+  form.append("temperature", "0");
+  form.append("language", "en");
+  form.append("response_format", "json");
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": process.env.GEMINI_API_KEY,
+      Authorization: "Bearer " + process.env.GROQ_API_KEY,
     },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            {
-              text: "Transcribe this audio exactly. Reply with only the transcript. If there is no speech, reply with an empty string.",
-            },
-            { inlineData: { mimeType: "audio/wav", data: wav.toString("base64") } },
-          ],
-        },
-      ],
-    }),
+    body: form,
   });
-  if (!res.ok) throw new Error("Gemini " + res.status + ": " + (await res.text()).slice(0, 200));
+
+  if (!res.ok) throw new Error("Groq STT " + res.status + ": " + (await res.text()).slice(0, 200));
   const json = await res.json();
-  const text = (json.candidates?.[0]?.content?.parts ?? [])
-    .map((p) => p.text ?? "")
-    .join("")
-    .trim();
+  const text = (json.text ?? "").trim();
   console.log(
-    `[TIMING] Gemini STT: ${((Date.now() - t0) / 1000).toFixed(2)}s (${(pcm.length / 32000).toFixed(1)}s audio)`
+    `[TIMING] Groq Whisper STT: ${((Date.now() - t0) / 1000).toFixed(2)}s (${(pcm.length / 32000).toFixed(1)}s audio)`
   );
   return text;
 }
 
-// AI Assistant router: understands natural speech and answers general questions for Even G2 display
+// AI Assistant router via Groq LLM (with local regex fallback)
 async function understandVoice(transcript) {
+  if (!process.env.GROQ_API_KEY) return parseCommand(transcript);
   const t0 = Date.now();
-  const url =
-    "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
 
   const systemPrompt =
     "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON crypto tip wallet.\n" +
-    "Classify the user's spoken input into ONE JSON object (no markdown, raw JSON only):\n" +
+    "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
     '1) Sending money/tip: {"type":"tip","amount":<number>,"name":"<recipient name>"}\n' +
     '2) Requesting money from someone: {"type":"ask","amount":<number>,"name":"<payer name>"}\n' +
     '3) Checking wallet balance: {"type":"balance"}\n' +
@@ -118,32 +112,28 @@ async function understandVoice(transcript) {
     "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown, formatted for a tiny heads-up display.";
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY,
+        Authorization: "Bearer " + process.env.GROQ_API_KEY,
       },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: systemPrompt + '\n\nUser said: "' + transcript + '"' }],
-          },
+        model: GROQ_LLM_MODEL,
+        temperature: 0.2,
+        max_tokens: 120,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: transcript },
         ],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-        },
       }),
     });
-    if (!res.ok) throw new Error("Gemini AI " + res.status);
+    if (!res.ok) throw new Error("Groq LLM " + res.status + ": " + (await res.text()).slice(0, 150));
     const json = await res.json();
-    const raw = (json.candidates?.[0]?.content?.parts ?? [])
-      .map((p) => p.text ?? "")
-      .join("")
-      .trim();
+    const raw = (json.choices?.[0]?.message?.content ?? "").trim();
     const parsed = JSON.parse(raw);
-    console.log(`[TIMING] Gemini AI intent (${parsed.type}): ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+    console.log(`[TIMING] Groq AI intent (${parsed.type}): ${((Date.now() - t0) / 1000).toFixed(2)}s`);
 
     if (parsed.type === "tip" && Number(parsed.amount) > 0 && parsed.name) {
       return { type: "tip", amount: Number(parsed.amount), name: String(parsed.name).trim() };
@@ -540,7 +530,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Send payment request directly to the payer in Telegram
           if (p.kind === "ask") {
             const me = load()[senderId];
             if (!me?.address) {
