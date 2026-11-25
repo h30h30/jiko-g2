@@ -8,7 +8,7 @@ import {
 
 const API =
   (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL ||
-  'http://127.0.0.1:8787'
+  'https://jiko-ob5s.onrender.com'
 const TOKEN_KEY = 'jiko_token'
 const MAX_LISTEN_MS = 15_000
 
