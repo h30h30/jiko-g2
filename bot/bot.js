@@ -20,7 +20,7 @@ import {
   getLastReplyTarget,
   pushInboxMessage,
 } from "./core.js";
-import { isNotionEnabled, saveNotionEntry } from "./notion.js";
+import { isNotionEnabled, saveNotionEntry, completeNotionTask } from "./notion.js";
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
@@ -32,22 +32,23 @@ const HELP =
   "1) Link your wallet: /start, then tap the wallet button (TON Testnet via TON Connect).\n" +
   "2) Pair your G2 glasses: send /pair and enter the 6-digit code in the Jiko companion app.\n" +
   "3) Speak naturally to your G2 glasses:\n" +
-  "   • \"buy Alex a coffee\" (converted via live TON/USD mainnet ref rate)\n" +
-  "   • \"send $5 to Alex\" or \"send 1 TON to Alex\"\n" +
+  "   • \"add task: record demo video\" & \"mark demo video as done\" (live Notion CRUD)\n" +
+  "   • \"what are my open tasks?\" or \"catch me up\" (HUD briefing)\n" +
+  "   • \"note: send pitch deck\" or \"what did I note about pitch deck?\"\n" +
+  "   • \"buy Alex a coffee\" / \"send $5 to Alex\" / \"send 1 TON to Alex\"\n" +
   "   • \"tell Alex I'm 5 minutes late\" (send & receive replies on G2)\n" +
-  "   • \"ask Alex for $3\" or \"what is TON price?\"\n" +
-  "   • \"note: send pitch deck tomorrow\" (saves to demo Notion log)\n" +
-  "   • \"summarize my Notion notes\" or \"how much did I spend?\"\n" +
   "   • Up/Down: flip 4 HUD cards · Double-tap: sync / cancel\n\n" +
   "Commands:\n" +
   "/start - link or change your wallet\n" +
   "/pair - get a code to connect your G2 glasses\n" +
+  "/task text - add an open task to Notion\n" +
+  "/done query - mark a Notion task complete\n" +
+  "/note text - save a quick note to Notion\n" +
   "/reply text - reply to the latest Jiko G2 message\n" +
   "/price - live TON/USD mainnet ref & coffee rate\n" +
   "/coffee amount - set your coffee reference price in USD (default $5)\n" +
   "/tip @user amount - send a testnet tip (max 25 GRAM)\n" +
   "/ask @user amount - request testnet GRAM from a friend\n" +
-  "/note text - save a quick note to the demo Notion log\n" +
   "/wallet - show your linked wallet\n" +
   "/voicename Name - opt-in voice alias for speech recognition (/voicename clear to remove)\n" +
   "/unlink - remove your wallet and unpair glasses\n" +
@@ -65,13 +66,13 @@ bot.command("start", async (ctx) => {
     save(db);
     return ctx.reply(
       "Welcome back! 🐦\nYour wallet: " + short(me.address) + " (testnet)\n" +
-        "Send /pair to connect your G2 glasses, /price for TON/USD ref rate, /coffee to set coffee price, or /help.",
+        "Send /pair to connect your G2 glasses, /task to add a Notion task, /price for TON/USD ref rate, or /help.",
       { reply_markup: walletKeyboard(true) }
     );
   }
   return ctx.reply(
     "Hi, I'm Jiko 🐦\n" +
-      "Your AI voice assistant, Notion workspace logger & non-custodial TON testnet tip wallet on Even G2 glasses.\n\n" +
+      "Your AI voice assistant, Notion workspace companion & non-custodial TON testnet tip wallet on Even G2 glasses.\n\n" +
       "Tap the button below to link your testnet wallet. For instructions, see /help.",
     { reply_markup: walletKeyboard(false) }
   );
@@ -170,7 +171,6 @@ bot.command("coffee", async (ctx) => {
   return ctx.reply(`☕ Coffee reference price set to $${me.coffeeUsd} ✅`);
 });
 
-// Direct reply command to answer a Jiko G2 message (raw text, never sent to AI)
 bot.command("reply", async (ctx) => {
   const text = (ctx.match ?? "").trim();
   if (!text) return ctx.reply("Usage: /reply Got it, see you in 5!");
@@ -186,6 +186,51 @@ bot.command("reply", async (ctx) => {
       .catch(() => {});
   }
   return ctx.reply(`✅ Reply delivered to ${route.senderLabel}'s Even G2 glasses.`);
+});
+
+bot.command("task", async (ctx) => {
+  const text = (ctx.match ?? "").trim();
+  if (!text) return ctx.reply("Usage: /task Record Jiko hackathon demo");
+  if (!isNotionEnabled()) return ctx.reply("Notion is not configured on the server yet.");
+  const me = load()[ctx.from.id];
+  if (!isNotionAllowed(ctx.from.id, me)) {
+    return ctx.reply("The shared demo Notion workspace is currently restricted to demo accounts.");
+  }
+  try {
+    const author = ctx.from.username ? "@" + ctx.from.username : ctx.from.first_name || "user";
+    await saveNotionEntry({
+      kind: "task",
+      title: text,
+      details: `Task added from Telegram by ${author}`,
+      done: false,
+    });
+    return ctx.reply("☐ Task added to Notion ✅\n" + text);
+  } catch (e) {
+    console.error("TELEGRAM TASK ERROR:", e.message);
+    return ctx.reply("Could not save task to Notion.");
+  }
+});
+
+bot.command("done", async (ctx) => {
+  const query = (ctx.match ?? "").trim();
+  if (!isNotionEnabled()) return ctx.reply("Notion is not configured on the server yet.");
+  const me = load()[ctx.from.id];
+  if (!isNotionAllowed(ctx.from.id, me)) {
+    return ctx.reply("The shared demo Notion workspace is currently restricted to demo accounts.");
+  }
+  try {
+    const r = await completeNotionTask(query);
+    if (r.missingCheckbox) {
+      return ctx.reply('Add a "Done" Checkbox column to your Notion database first.');
+    }
+    if (r.notFound) {
+      return ctx.reply('No open task matched "' + (query || "latest") + '".');
+    }
+    return ctx.reply("☑️ Marked done in Notion ✅\n" + r.task.title);
+  } catch (e) {
+    console.error("TELEGRAM DONE ERROR:", e.message);
+    return ctx.reply("Could not update task in Notion.");
+  }
 });
 
 bot.command("note", async (ctx) => {
@@ -347,7 +392,6 @@ bot.callbackQuery(/^wait:(.+)$/, async (ctx) => {
   );
 });
 
-// Native Telegram Reply to a Jiko G2 message -> push directly to sender's glasses (zero AI)
 bot.on("message:text", async (ctx) => {
   const text = (ctx.message.text ?? "").trim();
   if (!text || text.startsWith("/")) return;
@@ -459,20 +503,22 @@ bot.start({
     await bot.api.setMyCommands([
       { command: "start", description: "Link or change your wallet" },
       { command: "pair", description: "Connect your Even G2 glasses" },
+      { command: "task", description: "Add an open task to Notion" },
+      { command: "done", description: "Mark a Notion task complete" },
+      { command: "note", description: "Save a note to Notion" },
       { command: "reply", description: "Reply to a Jiko G2 message" },
       { command: "price", description: "Live TON/USD ref & coffee rate" },
       { command: "coffee", description: "Set your coffee ref price in USD" },
       { command: "tip", description: "Send a testnet tip: /tip @username 1" },
       { command: "ask", description: "Request testnet GRAM: /ask @username 2" },
-      { command: "note", description: "Save a note to demo Notion log" },
       { command: "help", description: "Instructions" },
       { command: "wallet", description: "Show your linked wallet" },
       { command: "voicename", description: "Opt-in voice name for G2" },
       { command: "unlink", description: "Remove wallet & unpair glasses" },
     ]);
-    await bot.api.setMyShortDescription("AI voice assistant, Telegram replies, Notion notes & TON tips on Even G2.");
+    await bot.api.setMyShortDescription("AI voice assistant for Notion tasks, Telegram replies & TON tips on Even G2.");
     await bot.api.setMyDescription(
-      "Jiko is your AI voice assistant, hands-free Telegram messenger, Notion workspace logger, and non-custodial TON testnet tip wallet on Even G2 glasses. Tap Start to link your wallet."
+      "Jiko is your AI voice assistant, two-way Notion task & note workspace, hands-free Telegram messenger, and non-custodial TON testnet tip wallet on Even G2 glasses. Tap Start to link your wallet."
     );
   },
 });

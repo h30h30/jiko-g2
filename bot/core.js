@@ -130,10 +130,10 @@ export function isNotionAllowed(userId, userRecord) {
 }
 
 // Two-way G2 <-> Telegram messaging (raw text only, zero AI on incoming replies)
-const replyRoutes = new Map(); // botMessageId -> { recipientId, senderId, senderLabel, exp }
-const lastReplyTarget = new Map(); // recipientId -> { senderId, senderLabel, exp }
-const glassesInbox = new Map(); // glassesUserId -> [{ from, fromId, text, at }]
-const lastInboxSender = new Map(); // glassesUserId -> { fromId, fromLabel, exp }
+const replyRoutes = new Map();
+const lastReplyTarget = new Map();
+const glassesInbox = new Map();
+const lastInboxSender = new Map();
 
 export function registerReplyRoute(botMessageId, recipientId, senderId, senderLabel) {
   const exp = Date.now() + 86_400_000;
@@ -329,35 +329,12 @@ export function parseCommand(text) {
   const t = raw.toLowerCase().replace(/[^a-z0-9.$@_\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // 1) Save note to Notion
-  const noteMatch = raw.match(/^(?:take a note|save a note|add a note|note|remember to|remind me to)\s*[:,-]?\s+(.+)$/i);
-  if (noteMatch && noteMatch[1].trim()) {
-    return { type: "note", content: noteMatch[1].trim() };
+  // 1) Quick HUD briefing
+  if (/\b(catch me up|brief me|daily brief|my briefing|status briefing)\b/.test(t)) {
+    return { type: "brief" };
   }
 
-  // 2) Smart Notion summary / spending report
-  if (
-    /\b(summarize|summary|analyze|report)\b.*\b(notes?|notion|log|spending|expenses?|tips?|coffees?)\b/.test(t) ||
-    /\bhow much\b.*\b(spend|spent|tip|tipped|sent)\b/.test(t) ||
-    /\btotal\b.*\b(spent|spending|tips?|expenses?)\b/.test(t)
-  ) {
-    return { type: "notion_summary", question: raw };
-  }
-
-  // 3) Read recent Notion notes
-  if (/\b(show|read|list|check|my)\b.*\b(notes?|notion)\b/.test(t)) {
-    return { type: "notes" };
-  }
-
-  // 4) Live TON/USD reference rate
-  if (
-    /\b(ton|toncoin)\b.*\b(price|rate|worth|usd|dollars?)\b/.test(t) ||
-    /\b(price|rate)\b.*\b(ton|toncoin)\b/.test(t)
-  ) {
-    return { type: "price" };
-  }
-
-// 5) Telegram quick message / reply
+  // 2) Telegram quick message / reply (checked before Notion/Balance)
   const tellMatch = raw.match(/^(?:tell|message|text)\s+@?([a-z0-9_]+)[,:\s]+(?:(?:that|to)\s+)?(.+)$/i);
   if (tellMatch && !/^(me|us)$/i.test(tellMatch[1]) && tellMatch[2].trim()) {
     return { type: "message", name: tellMatch[1], body: tellMatch[2].trim() };
@@ -371,7 +348,58 @@ export function parseCommand(text) {
     return { type: "message", name: "", body: replyOnlyMatch[1].trim() };
   }
 
-  // 6) Buy someone a coffee
+  // 3) Notion tasks: add / list open / mark done
+  const taskMatch = raw.match(/^(?:add a task|add task|new task|create task|task|to-?do)\s*[:,-]?\s+(.+)$/i);
+  if (taskMatch && taskMatch[1].trim()) {
+    return { type: "task", content: taskMatch[1].trim(), due: "" };
+  }
+  const doneMatch = raw.match(
+    /^(?:mark|complete|finish|check off|done with)\s+(.+?)(?:\s+as\s+(?:done|complete|completed|finished))?$/i
+  );
+  if (doneMatch && doneMatch[1].trim()) {
+    return { type: "complete_task", query: doneMatch[1].trim() };
+  }
+  if (/\b(open|pending|remaining|my|show|list)\b.*\b(tasks?|to-?dos?)\b/.test(t)) {
+    return { type: "tasks" };
+  }
+
+  // 4) Save voice note to Notion
+  const noteMatch = raw.match(/^(?:take a note|save a note|add a note|note|remember to|remind me to)\s*[:,-]?\s+(.+)$/i);
+  if (noteMatch && noteMatch[1].trim()) {
+    return { type: "note", content: noteMatch[1].trim() };
+  }
+
+  // 5) Smart Notion summary / spending report
+  if (
+    /\b(summarize|summary|analyze|report)\b.*\b(notes?|notion|log|spending|expenses?|tips?|coffees?|tasks?)\b/.test(t) ||
+    /\bhow much\b.*\b(spend|spent|tip|tipped|sent)\b/.test(t) ||
+    /\btotal\b.*\b(spent|spending|tips?|expenses?)\b/.test(t)
+  ) {
+    return { type: "notion_summary", question: raw };
+  }
+
+  // 6) Search Notion notes by topic
+  const searchMatch = raw.match(
+    /(?:what did i (?:note|write|save|log)|search (?:my )?(?:notes?|notion)|find (?:my )?(?:notes?|tasks?))\s+(?:about|for|on)?\s*(.+)$/i
+  );
+  if (searchMatch && searchMatch[1].trim()) {
+    return { type: "notion_search", query: searchMatch[1].trim() };
+  }
+
+  // 7) Read recent Notion notes
+  if (/\b(show|read|list|check|my)\b.*\b(notes?|notion)\b/.test(t)) {
+    return { type: "notes" };
+  }
+
+  // 8) Live TON/USD reference rate
+  if (
+    /\b(ton|toncoin)\b.*\b(price|rate|worth|usd|dollars?)\b/.test(t) ||
+    /\b(price|rate)\b.*\b(ton|toncoin)\b/.test(t)
+  ) {
+    return { type: "price" };
+  }
+
+  // 9) Buy someone a coffee
   const coffeeA = t.match(/\b(?:buy|get|treat|send)\s+@?([a-z0-9_]+)\s+(a|an|one|two|three|four|five|\d+)\s+coffees?\b/);
   if (coffeeA) {
     const count = Math.round(extractAmount(coffeeA[2]) || 1);
@@ -383,7 +411,7 @@ export function parseCommand(text) {
     if (count > 0) return { type: "coffee", count, name: coffeeB[2] };
   }
 
-  // 7) Payment request (TON/GRAM or USD)
+  // 10) Payment request (TON/GRAM or USD)
   const askMatch = t.match(/\b(?:ask|request)\s+@?([a-z0-9_]+)\s+(?:for|to send|to pay)\s+(.+)$/);
   if (askMatch) {
     const amount = extractAmount(askMatch[2]);
@@ -399,7 +427,7 @@ export function parseCommand(text) {
     }
   }
 
-  // 8) Tip command: "send 1 ton/gram to Alex" OR "send Alex 1 ton/gram"
+  // 11) Tip command: "send 1 ton/gram to Alex" OR "send Alex 1 ton/gram"
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
@@ -419,7 +447,7 @@ export function parseCommand(text) {
     }
   }
 
-  // 9) Recent transactions
+  // 12) Recent transactions
   if (
     !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
@@ -427,7 +455,7 @@ export function parseCommand(text) {
     return { type: "history" };
   }
 
-  // 10) Wallet balance
+  // 13) Wallet balance
   if (
     !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))

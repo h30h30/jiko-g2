@@ -23,6 +23,9 @@ import {
   saveNotionEntry,
   fetchNotionEntriesData,
   fetchRecentNotionEntries,
+  fetchOpenTasks,
+  completeNotionTask,
+  searchNotionEntries,
 } from "./notion.js";
 
 const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3-turbo";
@@ -156,7 +159,7 @@ async function transcribe(pcm) {
   const wav = wavFromPcm(pcm);
   const optInNames = getOptInVoiceNames();
   const sttPrompt =
-    "Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, replies, balance, and Notion notes." +
+    "Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, replies, tasks, mark as done, catch me up, balance, and Notion notes." +
     (optInNames.length ? " Opt-in voice names: " + optInNames.join(", ") + "." : "");
 
   const form = new FormData();
@@ -187,7 +190,7 @@ async function transcribe(pcm) {
 async function understandVoice(transcript) {
   const rawTranscript = (transcript ?? "").trim();
 
-  // Fast-path: explicit "tell/message/text <contact> ..." never gets misrouted to Notion or Balance
+  // Fast-path: explicit "tell/message/text <contact> ..." never gets misrouted
   const directMsg = rawTranscript.match(
     /^(?:tell|message|text)\s+@?([a-z0-9_]+)[,:\s]+(?:(?:that|to)\s+)?(.+)$/i
   );
@@ -208,24 +211,30 @@ async function understandVoice(transcript) {
   const contactsHint = optInNames.length
     ? `Opt-in voice names: ${optInNames.join(", ")}. Match phonetically close spoken names to an opt-in voice name when clearly intended.\n`
     : "";
+  const todayIso = new Date().toISOString().slice(0, 10);
 
   const systemPrompt =
-    "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to Telegram, a TON testnet tip wallet, and Notion.\n" +
+    `You are Jiko, a smart voice assistant on Even G2 smart glasses connected to Telegram, a TON testnet tip wallet, and Notion. Today is ${todayIso}.\n` +
     contactsHint +
     'Treat "TON", "Toncoin", and "GRAM" identically as the same tipping token (unit: "gram").\n' +
-    'PRIORITY RULE: If the user starts with "tell <person> ...", "message <person> ...", "text <person> ...", or "reply ..." (where <person> is NOT "me" or "us"), ALWAYS classify it as type "message" — even if the message body mentions chores/tasks (like "wash the dishes") or wallet words (like "balance", "price", "notes"). Strip leading "to " or "that " from the message body.\n' +
+    'PRIORITY RULE: If the user starts with "tell <person> ...", "message <person> ...", "text <person> ...", or "reply ..." (where <person> is NOT "me" or "us"), ALWAYS classify it as type "message" — even if the message body mentions chores/tasks or wallet words. Strip leading "to " or "that " from the message body.\n' +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
     '1) Sending a tip in TON/GRAM or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
     '2) Buying someone coffee(s): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
     '3) Requesting money from someone in TON/GRAM or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
-    '4) Sending a short Telegram message or replying to someone (e.g. "tell Alex I\'m 5 minutes late", "tell Alex to wash the dishes", or "reply sounds good" with empty name if no person named): {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
-    '5) Checking live TON/USD reference rate: {"type":"price"}\n' +
-    '6) Checking wallet balance: {"type":"balance"}\n' +
-    '7) Checking recent TON transactions/activity: {"type":"history"}\n' +
-    '8) Saving a personal voice note, reminder, memo, or task to Notion (only for the user themselves, never "tell <person> ..."): {"type":"note","content":"<clean note text>"}\n' +
-    '9) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
-    '10) Summarizing, analyzing, or asking questions about Notion notes, tasks, coffees, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
-    '11) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
+    '4) Sending a short Telegram message or replying to someone: {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
+    '5) Adding an actionable task/todo to Notion (e.g. "add task: record demo video", "todo send deck tomorrow"): {"type":"task","content":"<clean task text>","due":"<YYYY-MM-DD if date mentioned, else empty string>"}\n' +
+    '6) Listing open/pending Notion tasks (e.g. "what are my open tasks?", "show my todos"): {"type":"tasks"}\n' +
+    '7) Marking a Notion task as done/complete (e.g. "mark demo video as done", "complete pitch deck"): {"type":"complete_task","query":"<task keywords>"}\n' +
+    '8) Quick workspace + wallet briefing (e.g. "catch me up", "brief me", "give me my daily brief"): {"type":"brief"}\n' +
+    '9) Saving a general voice note or memo to Notion (personal note, never "tell <person> ..."): {"type":"note","content":"<clean note text>"}\n' +
+    '10) Searching Notion notes/tasks for a specific topic (e.g. "what did I note about pitch deck?", "find notes about Telegram"): {"type":"notion_search","query":"<topic or question>"}\n' +
+    '11) Simply listing the latest Notion entries: {"type":"notes"}\n' +
+    '12) Summarizing or asking about total spending/tips/activity in Notion: {"type":"notion_summary","question":"<user question>"}\n' +
+    '13) Checking live TON/USD reference rate: {"type":"price"}\n' +
+    '14) Checking wallet balance: {"type":"balance"}\n' +
+    '15) Checking recent TON transactions/activity: {"type":"history"}\n' +
+    '16) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
     "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown. " +
     "IMPORTANT: Never guess live prices for other coins (like BTC/ETH) or current weather; if asked for live data other than TON/USD, briefly say only live TON/USD is connected.";
 
@@ -272,6 +281,19 @@ async function understandVoice(transcript) {
         body: String(parsed.body).trim().slice(0, 140),
       };
     }
+    if (parsed.type === "task" && parsed.content) {
+      return {
+        type: "task",
+        content: String(parsed.content).trim(),
+        due: String(parsed.due || "").trim(),
+      };
+    }
+    if (parsed.type === "complete_task") {
+      return { type: "complete_task", query: String(parsed.query || "").trim() };
+    }
+    if (parsed.type === "notion_search") {
+      return { type: "notion_search", query: String(parsed.query || rawTranscript).trim() };
+    }
     if (parsed.type === "note" && parsed.content) {
       return { type: "note", content: String(parsed.content).trim() };
     }
@@ -279,6 +301,8 @@ async function understandVoice(transcript) {
       return { type: "notion_summary", question: String(parsed.question || rawTranscript).trim() };
     }
     if (
+      parsed.type === "tasks" ||
+      parsed.type === "brief" ||
       parsed.type === "price" ||
       parsed.type === "balance" ||
       parsed.type === "history" ||
@@ -302,13 +326,19 @@ async function summarizeNotion(question) {
 
   let tipCount = 0;
   let totalGram = 0;
+  let openTasks = 0;
+  let doneTasks = 0;
   let noteCount = 0;
 
   for (const e of entries) {
     const m = e.title.match(/^tip:\s*(\d+(?:\.\d+)?)\s*(?:gram|ton)/i);
     if (m || /crypto tip/i.test(e.tag)) {
       tipCount++;
-      if (m) totalGram += Number(m[1]);
+      if (typeof e.amount === "number" && e.amount > 0) totalGram += e.amount;
+      else if (m) totalGram += Number(m[1]);
+    } else if (/task/i.test(e.tag)) {
+      if (e.done) doneTasks++;
+      else openTasks++;
     } else {
       noteCount++;
     }
@@ -317,19 +347,24 @@ async function summarizeNotion(question) {
   const tonPrice = await fetchTonPriceUsd().catch(() => null);
   const usdSuffix = tonPrice ? ` (~$${(totalGram * tonPrice).toFixed(2)} ref)` : "";
   const fallback =
-    `Notion summary (testnet):\nTips: ${tipCount} (${totalGram.toFixed(2)} GRAM${usdSuffix})\nNotes: ${noteCount}`;
+    `Notion summary (testnet):\n` +
+    `Tips: ${tipCount} (${totalGram.toFixed(2)} GRAM${usdSuffix})\n` +
+    `Tasks: ${openTasks} open, ${doneTasks} done · Notes: ${noteCount}`;
 
   if (!process.env.GROQ_API_KEY) return fallback;
 
   const t0 = Date.now();
   const listText = entries
-    .map((e, i) => `${i + 1}. [${e.tag || "Entry"} | ${e.date}] ${e.title}`)
+    .map((e, i) => {
+      const status = /task/i.test(e.tag) ? (e.done ? "DONE" : "OPEN") : e.tag || "Entry";
+      return `${i + 1}. [${status} | ${e.date}] ${e.title}`;
+    })
     .join("\n");
 
   const prompt =
     "You are Jiko on Even G2 smart glasses. Answer the user's question using ONLY the Notion workspace entries and exact pre-calculated stats below.\n" +
     "Format rules: max 4 short lines (under 140 characters total), plain text only, no markdown, no emojis, no invented facts. Mention 'ref, testnet' when quoting USD values.\n\n" +
-    `Exact stats: ${tipCount} testnet tips totaling ${totalGram.toFixed(2)} GRAM${usdSuffix}; ${noteCount} notes.\n` +
+    `Exact stats: ${tipCount} testnet tips totaling ${totalGram.toFixed(2)} GRAM${usdSuffix}; ${openTasks} open tasks, ${doneTasks} done tasks; ${noteCount} notes.\n` +
     `Entries (newest first):\n${listText}`;
 
   try {
@@ -358,6 +393,100 @@ async function summarizeNotion(question) {
     console.error("NOTION SUMMARY FALLBACK:", e.message);
     return fallback;
   }
+}
+
+async function searchNotionWithAi(query) {
+  const { matched, all } = await searchNotionEntries(query, 30);
+  if (!all.length) return "Notion log is empty.";
+
+  if (matched.length && !process.env.GROQ_API_KEY) {
+    const lines = matched.slice(0, 3).map((e) => "- " + e.title.slice(0, 30));
+    return "Matches:\n" + lines.join("\n");
+  }
+
+  const contextList = (matched.length ? matched.slice(0, 8) : all.slice(0, 15))
+    .map((e, i) => {
+      const status = /task/i.test(e.tag) ? (e.done ? "DONE" : "OPEN") : e.tag || "Note";
+      return `${i + 1}. [${status} | ${e.date}] ${e.title}`;
+    })
+    .join("\n");
+
+  const t0 = Date.now();
+  const prompt =
+    "You are Jiko on Even G2 smart glasses. Answer the user's lookup query using ONLY the Notion entries below. If nothing matches, say no matching Notion entry was found.\n" +
+    "Format rules: max 4 short lines (under 140 characters total), plain text only, no markdown, no emojis.\n\n" +
+    `Notion entries:\n${contextList}`;
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + process.env.GROQ_API_KEY,
+      },
+      body: JSON.stringify({
+        model: GROQ_LLM_MODEL,
+        temperature: 0.1,
+        max_tokens: 1024,
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: query },
+        ],
+      }),
+    });
+    if (!res.ok) throw new Error("Groq Notion search " + res.status);
+    const json = await res.json();
+    const replyText = (json.choices?.[0]?.message?.content ?? "").trim();
+    console.log(`[TIMING] Groq Notion search: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+    if (replyText) return replyText.slice(0, 160);
+  } catch (e) {
+    console.error("NOTION SEARCH FALLBACK:", e.message);
+  }
+
+  if (!matched.length) return 'No Notion match for\n"' + query.slice(0, 28) + '"';
+  return "Matches:\n" + matched.slice(0, 3).map((e) => "- " + e.title.slice(0, 30)).join("\n");
+}
+
+async function buildBriefing(senderId, me) {
+  const canNotion = isNotionEnabled() && isNotionAllowed(senderId, me);
+  const [balRes, priceRes, entriesRes] = await Promise.allSettled([
+    me?.address ? fetchBalance(me.address) : Promise.resolve(null),
+    fetchTonPriceUsd(),
+    canNotion ? fetchNotionEntriesData(25) : Promise.resolve(null),
+  ]);
+
+  const lines = ["Jiko Briefing"];
+
+  if (entriesRes.status === "fulfilled" && Array.isArray(entriesRes.value)) {
+    const entries = entriesRes.value;
+    const openTasks = entries.filter((e) => /task/i.test(e.tag) && !e.done);
+    const latestNote = entries.find((e) => !/task/i.test(e.tag) && !/crypto tip/i.test(e.tag));
+
+    if (openTasks.length) {
+      const next = openTasks[0].title.length > 22 ? openTasks[0].title.slice(0, 19) + "..." : openTasks[0].title;
+      lines.push(`Open tasks: ${openTasks.length} (${next})`);
+    } else {
+      lines.push("Open tasks: 0 (all clear)");
+    }
+
+    if (latestNote) {
+      const n = latestNote.title.length > 24 ? latestNote.title.slice(0, 21) + "..." : latestNote.title;
+      lines.push("Note: " + n);
+    }
+  } else {
+    lines.push("Notion: not connected");
+  }
+
+  const bal = balRes.status === "fulfilled" ? balRes.value : null;
+  const price = priceRes.status === "fulfilled" ? priceRes.value : null;
+  if (bal) {
+    const ref = price ? ` (~$${(Number(bal) * price).toFixed(2)} ref)` : "";
+    lines.push(`Wallet: ${bal} GRAM${ref}`);
+  } else if (price) {
+    lines.push(`TON ref: $${price.toFixed(2)}`);
+  }
+
+  return lines.join("\n");
 }
 
 async function fetchBalance(address, force = false) {
@@ -438,8 +567,8 @@ async function buildCards(address, senderId, me) {
   const card1 =
     "Welcome to Jiko · 1/4\n" +
     `Hi ${greetingName}!\n` +
-    "Voice AI for Telegram,\n" +
-    "TON tips & Notion";
+    "Voice AI for Notion,\n" +
+    "Telegram & TON tips";
 
   const bal = balRes.status === "fulfilled" ? balRes.value : null;
   const tonPrice = priceRes.status === "fulfilled" ? priceRes.value : null;
@@ -469,10 +598,10 @@ async function buildCards(address, senderId, me) {
 
   const card4 =
     "Instructions · 4/4\n" +
+    '• "Add task: demo video"\n' +
+    '• "Mark demo video done"\n' +
     '• "Buy Alex a coffee"\n' +
-    '• "Tell Alex I\'m 5m late"\n' +
-    '• "Note: call team"\n' +
-    '• "How much did I spend?"';
+    '• "Tell Alex I\'m 5m late"';
 
   return { balance: bal, cards: [card1, card2, card3, card4] };
 }
@@ -548,10 +677,17 @@ async function checkWatches(bot) {
       const senderRecord = load()[String(w.senderId)];
       if (isNotionEnabled() && isNotionAllowed(w.senderId, senderRecord)) {
         try {
+          let usdNum = typeof w.usdRefNum === "number" ? w.usdRefNum : null;
+          if (usdNum === null) {
+            const p = await fetchTonPriceUsd().catch(() => null);
+            if (p) usdNum = Number((Number(w.amount) * p).toFixed(2));
+          }
           await saveNotionEntry({
             kind: "tip",
             title: `Tip: ${w.amount} GRAM -> ${w.label}${extraTag}`,
             details: `From ${w.senderLabel} to ${w.label} · ${w.amount} GRAM${extraTag} (TON Testnet, no real value) · Logged automatically by Jiko`,
+            amount: Number(w.amount),
+            usdRef: usdNum,
           });
           notionSuffix = "\n📒 Logged to Notion.";
         } catch (e) {
@@ -686,7 +822,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           return reply(res, 401, { ok: false, error: "Not paired" });
         }
 
-        // Poll incoming Telegram replies (raw text only, never touches AI)
         if (req.url === "/inbox") {
           const item = popInboxMessage(senderId);
           return reply(res, 200, { ok: true, message: item || null });
@@ -710,11 +845,27 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: 'Didn\'t get that.\nTry: "Buy Alex a coffee",\n"Tell Alex I\'m 5m late", or "Note: ..."',
+              message: 'Didn\'t get that.\nTry: "Add task: ...",\n"Buy Alex a coffee", or "Catch me up"',
             });
           }
 
           const me = load()[senderId];
+
+          // Quick HUD briefing (open tasks + latest note + wallet)
+          if (cmd.type === "brief") {
+            try {
+              const msg = await buildBriefing(senderId, me);
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                refreshCards: true,
+                message: msg,
+              });
+            } catch (e) {
+              console.error("BRIEF ERROR:", e.message);
+              return reply(res, 200, { ok: false, message: "Could not load briefing.\nTry again." });
+            }
+          }
 
           // Hands-free Telegram message / voice reply
           if (cmd.type === "message") {
@@ -778,6 +929,121 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               id,
               summary: `Message ${label}:\n"${preview}"`,
             });
+          }
+
+          // Notion: Add actionable task
+          if (cmd.type === "task") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, { ok: false, message: "Notion not configured." });
+            }
+            if (!isNotionAllowed(senderId, me)) {
+              return reply(res, 200, { ok: false, message: "Shared Notion log is restricted\nto demo accounts." });
+            }
+            try {
+              await saveNotionEntry({
+                kind: "task",
+                title: cmd.content,
+                details: `Task added by ${userLabel(me)} via Even G2 glasses`,
+                done: false,
+                due: cmd.due || null,
+              });
+              const preview = cmd.content.length > 54 ? cmd.content.slice(0, 51) + "..." : cmd.content;
+              const dueSuffix = cmd.due ? `\nDue: ${cmd.due}` : "";
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                refreshCards: true,
+                message: `Task added to Notion:\n[ ] ${preview}${dueSuffix}`,
+              });
+            } catch (e) {
+              console.error("NOTION TASK ERROR:", e.message);
+              return reply(res, 200, { ok: false, message: "Could not save task to Notion." });
+            }
+          }
+
+          // Notion: List open tasks only
+          if (cmd.type === "tasks") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, { ok: false, message: "Notion not configured." });
+            }
+            if (!isNotionAllowed(senderId, me)) {
+              return reply(res, 200, { ok: false, message: "Shared Notion log is restricted\nto demo accounts." });
+            }
+            try {
+              const open = await fetchOpenTasks(30);
+              if (!open.length) {
+                return reply(res, 200, {
+                  ok: true,
+                  type: "answer",
+                  message: "Open tasks: 0\nAll caught up!",
+                });
+              }
+              const lines = open.slice(0, 4).map((t) => {
+                const c = t.title.length > 28 ? t.title.slice(0, 25) + "..." : t.title;
+                return "[ ] " + c;
+              });
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                message: `Open tasks (${open.length}):\n` + lines.join("\n"),
+              });
+            } catch (e) {
+              console.error("NOTION TASKS READ ERROR:", e.message);
+              return reply(res, 200, { ok: false, message: "Could not load open tasks." });
+            }
+          }
+
+          // Notion: Live-check a task as Done (PATCH)
+          if (cmd.type === "complete_task") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, { ok: false, message: "Notion not configured." });
+            }
+            if (!isNotionAllowed(senderId, me)) {
+              return reply(res, 200, { ok: false, message: "Shared Notion log is restricted\nto demo accounts." });
+            }
+            try {
+              const resTask = await completeNotionTask(cmd.query);
+              if (resTask.missingCheckbox) {
+                return reply(res, 200, {
+                  ok: false,
+                  message: 'Add a "Done" checkbox\ncolumn in Notion first.',
+                });
+              }
+              if (resTask.notFound) {
+                return reply(res, 200, {
+                  ok: false,
+                  message: 'No open task matching\n"' + (cmd.query || "that").slice(0, 26) + '"',
+                });
+              }
+              const title = resTask.task.title;
+              const preview = title.length > 52 ? title.slice(0, 49) + "..." : title;
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                refreshCards: true,
+                message: `Done in Notion:\n[x] ${preview}`,
+              });
+            } catch (e) {
+              console.error("NOTION COMPLETE ERROR:", e.message);
+              return reply(res, 200, { ok: false, message: "Could not update task in Notion." });
+            }
+          }
+
+          // Notion: Search notes/tasks by topic
+          if (cmd.type === "notion_search") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, { ok: false, message: "Notion not configured." });
+            }
+            if (!isNotionAllowed(senderId, me)) {
+              return reply(res, 200, { ok: false, message: "Shared Notion log is restricted\nto demo accounts." });
+            }
+            try {
+              const msg = await searchNotionWithAi(cmd.query);
+              return reply(res, 200, { ok: true, type: "answer", message: msg });
+            } catch (e) {
+              console.error("NOTION SEARCH ERROR:", e.message);
+              return reply(res, 200, { ok: false, message: "Could not search Notion." });
+            }
           }
 
           // Live TON/USD reference rate
@@ -968,6 +1234,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (cmd.type === "ask") {
             let amountGram = cmd.amount;
             let usdDisplay = "";
+            let usdRefNum = null;
             if (cmd.unit === "usd") {
               const tonPrice = await fetchTonPriceUsd().catch(() => null);
               if (!tonPrice) {
@@ -975,9 +1242,13 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               }
               amountGram = usdToGram(cmd.amount, tonPrice);
               usdDisplay = fmtUsd(cmd.amount) + " ref";
+              usdRefNum = Number(cmd.amount);
             } else {
               const tonPrice = await fetchTonPriceUsd().catch(() => null);
-              if (tonPrice) usdDisplay = "~$" + (amountGram * tonPrice).toFixed(2) + " ref";
+              if (tonPrice) {
+                usdRefNum = Number((amountGram * tonPrice).toFixed(2));
+                usdDisplay = "~$" + usdRefNum.toFixed(2) + " ref";
+              }
             }
 
             if (amountGram > MAX_TESTNET_GRAM) {
@@ -995,7 +1266,16 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
             const id = crypto.randomBytes(8).toString("hex");
             const label = payer.username ? "@" + payer.username : payer.first_name || cmd.name;
-            pending.set(id, { kind: "ask", senderId, payer, amount: amountGram, usdDisplay, label, at: Date.now() });
+            pending.set(id, {
+              kind: "ask",
+              senderId,
+              payer,
+              amount: amountGram,
+              usdDisplay,
+              usdRefNum,
+              label,
+              at: Date.now(),
+            });
             return reply(res, 200, {
               ok: true,
               type: "ask",
@@ -1007,6 +1287,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           // Buy someone a coffee OR Tip
           let amountGram = cmd.amount;
           let usdDisplay = "";
+          let usdRefNum = null;
           let coffeeCount = 0;
           let noteTag = "";
 
@@ -1018,6 +1299,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, { ok: false, message: "Live TON rate unavailable.\nTry again." });
             }
             amountGram = usdToGram(totalUsd, tonPrice);
+            usdRefNum = Number(totalUsd.toFixed(2));
             usdDisplay = fmtUsd(totalUsd) + " ref";
             noteTag = `Coffee x${coffeeCount}`;
           } else if (cmd.unit === "usd") {
@@ -1026,10 +1308,14 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, { ok: false, message: "Live TON rate unavailable.\nSay amount in GRAM." });
             }
             amountGram = usdToGram(cmd.amount, tonPrice);
+            usdRefNum = Number(Number(cmd.amount).toFixed(2));
             usdDisplay = fmtUsd(cmd.amount) + " ref";
           } else {
             const tonPrice = await fetchTonPriceUsd().catch(() => null);
-            if (tonPrice) usdDisplay = "~$" + (amountGram * tonPrice).toFixed(2) + " ref";
+            if (tonPrice) {
+              usdRefNum = Number((amountGram * tonPrice).toFixed(2));
+              usdDisplay = "~$" + usdRefNum.toFixed(2) + " ref";
+            }
           }
 
           if (amountGram > MAX_TESTNET_GRAM) {
@@ -1070,6 +1356,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             user,
             amount: amountGram,
             usdDisplay,
+            usdRefNum,
             coffeeCount,
             noteTag,
             label,
@@ -1096,7 +1383,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             return reply(res, 200, { ok: false, message: "Expired" });
           }
 
-          // Deliver confirmed Telegram message via bot
           if (p.kind === "message") {
             const me = load()[senderId];
             const senderLabel = userLabel(me);
@@ -1184,6 +1470,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
                 nano: String(Math.round(p.amount * 1e9)),
                 amount: p.amount,
                 usdDisplay: p.usdDisplay || "",
+                usdRefNum: p.usdRefNum ?? null,
                 label: requesterLabel,
                 messageId: sentToPayer.message_id,
                 since: Date.now(),
@@ -1220,6 +1507,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               nano: String(Math.round(p.amount * 1e9)),
               amount: p.amount,
               usdDisplay: p.usdDisplay || "",
+              usdRefNum: p.usdRefNum ?? null,
               coffeeCount: p.coffeeCount || 0,
               noteTag: p.noteTag || "",
               label: p.label,
