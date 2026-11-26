@@ -14,6 +14,9 @@ import {
   createInviteDraft,
   isDbEnabled,
   isNotionAllowed,
+  registerReplyRoute,
+  popInboxMessage,
+  getLastInboxSender,
 } from "./core.js";
 import {
   isNotionEnabled,
@@ -32,7 +35,7 @@ export function getUserCoffeeUsd(userId) {
   return Number.isFinite(custom) && custom > 0 ? custom : COFFEE_PRICE_USD;
 }
 
-// Privacy-first: ONLY include explicit opt-in /voicename aliases (never Telegram usernames or first names)
+// Privacy-first: ONLY include explicit opt-in /voicename aliases
 function getOptInVoiceNames() {
   const names = new Set();
   for (const u of Object.values(load())) {
@@ -153,7 +156,7 @@ async function transcribe(pcm) {
   const wav = wavFromPcm(pcm);
   const optInNames = getOptInVoiceNames();
   const sttPrompt =
-    "Voice commands for TON, GRAM, USD, coffee tips, balance, and Notion notes." +
+    "Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, replies, balance, and Notion notes." +
     (optInNames.length ? " Opt-in voice names: " + optInNames.join(", ") + "." : "");
 
   const form = new FormData();
@@ -190,20 +193,21 @@ async function understandVoice(transcript) {
     : "";
 
   const systemPrompt =
-    "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON testnet crypto tip wallet and Notion workspace.\n" +
+    "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to Telegram, a TON testnet tip wallet, and Notion.\n" +
     contactsHint +
     'Treat "TON", "Toncoin", and "GRAM" identically as the same tipping token (unit: "gram").\n' +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
     '1) Sending a tip in TON/GRAM or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
     '2) Buying someone coffee(s): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
     '3) Requesting money from someone in TON/GRAM or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
-    '4) Checking live TON/USD reference rate: {"type":"price"}\n' +
-    '5) Checking wallet balance: {"type":"balance"}\n' +
-    '6) Checking recent TON transactions/activity: {"type":"history"}\n' +
-    '7) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
-    '8) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
-    '9) Summarizing, analyzing, or asking questions about Notion notes, tasks, coffees, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
-    '10) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
+    '4) Sending a short Telegram message or replying to someone (e.g. "tell Alex I\'m 5 minutes late", "message Sam on my way", or "reply sounds good" with empty name if no person named): {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
+    '5) Checking live TON/USD reference rate: {"type":"price"}\n' +
+    '6) Checking wallet balance: {"type":"balance"}\n' +
+    '7) Checking recent TON transactions/activity: {"type":"history"}\n' +
+    '8) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
+    '9) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
+    '10) Summarizing, analyzing, or asking questions about Notion notes, tasks, coffees, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
+    '11) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
     "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown. " +
     "IMPORTANT: Never guess live prices for other coins (like BTC/ETH) or current weather; if asked for live data other than TON/USD, briefly say only live TON/USD is connected.";
 
@@ -242,6 +246,13 @@ async function understandVoice(transcript) {
     if (parsed.type === "ask" && Number(parsed.amount) > 0 && parsed.name) {
       const unit = String(parsed.unit || "gram").toLowerCase() === "usd" ? "usd" : "gram";
       return { type: "ask", amount: Number(parsed.amount), unit, name: String(parsed.name).trim() };
+    }
+    if (parsed.type === "message" && parsed.body) {
+      return {
+        type: "message",
+        name: String(parsed.name || "").trim(),
+        body: String(parsed.body).trim().slice(0, 140),
+      };
     }
     if (parsed.type === "note" && parsed.content) {
       return { type: "note", content: String(parsed.content).trim() };
@@ -331,7 +342,6 @@ async function summarizeNotion(question) {
   }
 }
 
-// Cached + auto-retry Toncenter balance fetcher
 async function fetchBalance(address, force = false) {
   const cached = balanceCache.get(address);
   if (!force && cached && Date.now() - cached.at < 15_000) {
@@ -410,8 +420,8 @@ async function buildCards(address, senderId, me) {
   const card1 =
     "Welcome to Jiko · 1/4\n" +
     `Hi ${greetingName}!\n` +
-    "Hands-free AI assistant\n" +
-    "for TON tips & Notion";
+    "Voice AI for Telegram,\n" +
+    "TON tips & Notion";
 
   const bal = balRes.status === "fulfilled" ? balRes.value : null;
   const tonPrice = priceRes.status === "fulfilled" ? priceRes.value : null;
@@ -442,7 +452,7 @@ async function buildCards(address, senderId, me) {
   const card4 =
     "Instructions · 4/4\n" +
     '• "Buy Alex a coffee"\n' +
-    '• "Send 1 TON to Alex"\n' +
+    '• "Tell Alex I\'m 5m late"\n' +
     '• "Note: call team"\n' +
     '• "How much did I spend?"';
 
@@ -658,6 +668,12 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           return reply(res, 401, { ok: false, error: "Not paired" });
         }
 
+        // Poll incoming Telegram replies (raw text only, never touches AI)
+        if (req.url === "/inbox") {
+          const item = popInboxMessage(senderId);
+          return reply(res, 200, { ok: true, message: item || null });
+        }
+
         if (req.url === "/cards") {
           const me = load()[senderId];
           if (!me?.address) return reply(res, 401, { ok: false, error: "Wallet unlinked" });
@@ -676,11 +692,75 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: 'Didn\'t get that.\nTry: "Buy Alex a coffee",\n"Send 1 TON to Alex", or "Note: ..."',
+              message: 'Didn\'t get that.\nTry: "Buy Alex a coffee",\n"Tell Alex I\'m 5m late", or "Note: ..."',
             });
           }
 
           const me = load()[senderId];
+
+          // Hands-free Telegram message / voice reply
+          if (cmd.type === "message") {
+            const bodyText = String(cmd.body || "").trim().slice(0, 140);
+            if (!bodyText) {
+              return reply(res, 200, { ok: false, message: "No message text heard." });
+            }
+
+            let targetUser = null;
+            const rawName = String(cmd.name || "").trim();
+            const isGenericReply = !rawName || /^(them|back|him|her|reply)$/i.test(rawName);
+
+            if (isGenericReply) {
+              const lastIn = getLastInboxSender(senderId);
+              if (lastIn) {
+                const dbRec = load()[lastIn.fromId];
+                targetUser = dbRec
+                  ? { ...dbRec, id: lastIn.fromId }
+                  : { id: lastIn.fromId, first_name: lastIn.fromLabel };
+              } else {
+                return reply(res, 200, {
+                  ok: false,
+                  message: 'No recent reply to answer.\nSay: "Tell Alex I\'m 5m late"',
+                });
+              }
+            } else {
+              const found = findRecipient(rawName);
+              if (found?.ambiguous) {
+                return reply(res, 200, {
+                  ok: false,
+                  message: 'Several matches for\n"' + rawName + '".\nSay the voice name.',
+                });
+              }
+              if (!found) {
+                return reply(res, 200, {
+                  ok: false,
+                  message: 'No Jiko user found for\n"' + rawName + '"',
+                });
+              }
+              targetUser = found;
+            }
+
+            const id = crypto.randomBytes(8).toString("hex");
+            const label = targetUser.username
+              ? "@" + targetUser.username
+              : targetUser.first_name || rawName || "user";
+            const preview = bodyText.length > 52 ? bodyText.slice(0, 49) + "..." : bodyText;
+
+            pending.set(id, {
+              kind: "message",
+              senderId,
+              recipient: targetUser,
+              body: bodyText,
+              label,
+              at: Date.now(),
+            });
+
+            return reply(res, 200, {
+              ok: true,
+              type: "message",
+              id,
+              summary: `Message ${label}:\n"${preview}"`,
+            });
+          }
 
           // Live TON/USD reference rate
           if (cmd.type === "price") {
@@ -811,7 +891,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Balance check (with mainnet reference USD rate)
+          // Balance check
           if (cmd.type === "balance") {
             if (!me?.address) {
               return reply(res, 200, {
@@ -866,7 +946,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Payment request (TON/GRAM or USD ref)
+          // Payment request
           if (cmd.type === "ask") {
             let amountGram = cmd.amount;
             let usdDisplay = "";
@@ -906,7 +986,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Buy someone a coffee OR Tip (TON/GRAM / USD ref)
+          // Buy someone a coffee OR Tip
           let amountGram = cmd.amount;
           let usdDisplay = "";
           let coffeeCount = 0;
@@ -996,6 +1076,36 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           pending.delete(id);
           if (!p || p.senderId !== senderId || Date.now() - p.at > 60_000) {
             return reply(res, 200, { ok: false, message: "Expired" });
+          }
+
+          // Deliver confirmed Telegram message via bot
+          if (p.kind === "message") {
+            const me = load()[senderId];
+            const senderLabel = userLabel(me);
+            const sentMsg = await bot.api
+              .sendMessage(
+                p.recipient.id,
+                `💬 Message from ${senderLabel} (via Jiko G2):\n"${p.body}"\n\n↩️ Reply directly to this message (or send /reply <text>) to answer on their glasses.`
+              )
+              .catch(() => null);
+
+            if (!sentMsg) {
+              return reply(res, 200, { ok: false, message: "Could not reach " + p.label });
+            }
+
+            registerReplyRoute(sentMsg.message_id, p.recipient.id, senderId, senderLabel);
+
+            if (String(p.recipient.id) !== String(senderId)) {
+              await bot.api
+                .sendMessage(senderId, `💬 Sent to ${p.label}: "${p.body}"`)
+                .catch(() => {});
+            }
+
+            return reply(res, 200, {
+              ok: true,
+              type: "message",
+              message: "Sent to " + p.label + "!",
+            });
           }
 
           if (p.kind === "invite") {

@@ -16,6 +16,9 @@ import {
   consumeInviteDraft,
   addPendingInvite,
   popPendingInvitesFor,
+  findReplyRoute,
+  getLastReplyTarget,
+  pushInboxMessage,
 } from "./core.js";
 import { isNotionEnabled, saveNotionEntry } from "./notion.js";
 
@@ -31,6 +34,7 @@ const HELP =
   "3) Speak naturally to your G2 glasses:\n" +
   "   • \"buy Alex a coffee\" (converted via live TON/USD mainnet ref rate)\n" +
   "   • \"send $5 to Alex\" or \"send 1 TON to Alex\"\n" +
+  "   • \"tell Alex I'm 5 minutes late\" (send & receive replies on G2)\n" +
   "   • \"ask Alex for $3\" or \"what is TON price?\"\n" +
   "   • \"note: send pitch deck tomorrow\" (saves to demo Notion log)\n" +
   "   • \"summarize my Notion notes\" or \"how much did I spend?\"\n" +
@@ -38,6 +42,7 @@ const HELP =
   "Commands:\n" +
   "/start - link or change your wallet\n" +
   "/pair - get a code to connect your G2 glasses\n" +
+  "/reply text - reply to the latest Jiko G2 message\n" +
   "/price - live TON/USD mainnet ref & coffee rate\n" +
   "/coffee amount - set your coffee reference price in USD (default $5)\n" +
   "/tip @user amount - send a testnet tip (max 25 GRAM)\n" +
@@ -163,6 +168,24 @@ bot.command("coffee", async (ctx) => {
   me.coffeeUsd = Number(price.toFixed(2));
   save(db);
   return ctx.reply(`☕ Coffee reference price set to $${me.coffeeUsd} ✅`);
+});
+
+// Direct reply command to answer a Jiko G2 message (raw text, never sent to AI)
+bot.command("reply", async (ctx) => {
+  const text = (ctx.match ?? "").trim();
+  if (!text) return ctx.reply("Usage: /reply Got it, see you in 5!");
+  const route = getLastReplyTarget(ctx.from.id);
+  if (!route) {
+    return ctx.reply("No recent Jiko G2 message to reply to.");
+  }
+  const fromLabel = ctx.from.username ? "@" + ctx.from.username : ctx.from.first_name || "friend";
+  pushInboxMessage(route.senderId, fromLabel, text, ctx.from.id);
+  if (String(route.senderId) !== String(ctx.from.id)) {
+    await bot.api
+      .sendMessage(route.senderId, `💬 Reply from ${fromLabel} (shown on G2):\n"${text.slice(0, 120)}"`)
+      .catch(() => {});
+  }
+  return ctx.reply(`✅ Reply delivered to ${route.senderLabel}'s Even G2 glasses.`);
 });
 
 bot.command("note", async (ctx) => {
@@ -324,6 +347,26 @@ bot.callbackQuery(/^wait:(.+)$/, async (ctx) => {
   );
 });
 
+// Native Telegram Reply to a Jiko G2 message -> push directly to sender's glasses (zero AI)
+bot.on("message:text", async (ctx) => {
+  const text = (ctx.message.text ?? "").trim();
+  if (!text || text.startsWith("/")) return;
+  const replyToId = ctx.message.reply_to_message?.message_id;
+  if (!replyToId) return;
+
+  const route = findReplyRoute(replyToId);
+  if (!route) return;
+
+  const fromLabel = ctx.from.username ? "@" + ctx.from.username : ctx.from.first_name || "friend";
+  pushInboxMessage(route.senderId, fromLabel, text, ctx.from.id);
+  if (String(route.senderId) !== String(ctx.from.id)) {
+    await bot.api
+      .sendMessage(route.senderId, `💬 Reply from ${fromLabel} (shown on G2):\n"${text.slice(0, 120)}"`)
+      .catch(() => {});
+  }
+  return ctx.reply(`✅ Reply delivered to ${route.senderLabel}'s Even G2 glasses.`);
+});
+
 bot.on("message:web_app_data", async (ctx) => {
   try {
     const data = JSON.parse(ctx.message.web_app_data.data);
@@ -406,7 +449,6 @@ bot.on("message:web_app_data", async (ctx) => {
   }
 });
 
-// Boot storage first, then start API and Telegram bot
 await initStorage();
 startApi(bot);
 
@@ -417,6 +459,7 @@ bot.start({
     await bot.api.setMyCommands([
       { command: "start", description: "Link or change your wallet" },
       { command: "pair", description: "Connect your Even G2 glasses" },
+      { command: "reply", description: "Reply to a Jiko G2 message" },
       { command: "price", description: "Live TON/USD ref & coffee rate" },
       { command: "coffee", description: "Set your coffee ref price in USD" },
       { command: "tip", description: "Send a testnet tip: /tip @username 1" },
@@ -427,9 +470,9 @@ bot.start({
       { command: "voicename", description: "Opt-in voice name for G2" },
       { command: "unlink", description: "Remove wallet & unpair glasses" },
     ]);
-    await bot.api.setMyShortDescription("AI voice assistant, Notion notes & TON testnet tips on Even G2 glasses.");
+    await bot.api.setMyShortDescription("AI voice assistant, Telegram replies, Notion notes & TON tips on Even G2.");
     await bot.api.setMyDescription(
-      "Jiko is your AI voice assistant, Notion workspace logger, and non-custodial TON testnet tip wallet on Even G2 glasses. Tap Start to link your wallet."
+      "Jiko is your AI voice assistant, hands-free Telegram messenger, Notion workspace logger, and non-custodial TON testnet tip wallet on Even G2 glasses. Tap Start to link your wallet."
     );
   },
 });

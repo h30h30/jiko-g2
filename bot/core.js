@@ -48,7 +48,6 @@ export async function initStorage() {
     connectionTimeoutMillis: 10_000,
   });
 
-  // Prevent unhandled error crashes when Neon suspends idle connections
   pool.on("error", (err) => {
     console.error("[STORAGE] Postgres idle pool error:", err.message);
   });
@@ -128,6 +127,79 @@ export function isNotionAllowed(userId, userRecord) {
   const uid = String(userId ?? "");
   const uname = (userRecord?.username || "").toLowerCase();
   return allowList.includes(uid) || (Boolean(uname) && allowList.includes(uname));
+}
+
+// Two-way G2 <-> Telegram messaging (raw text only, zero AI on incoming replies)
+const replyRoutes = new Map(); // botMessageId -> { recipientId, senderId, senderLabel, exp }
+const lastReplyTarget = new Map(); // recipientId -> { senderId, senderLabel, exp }
+const glassesInbox = new Map(); // glassesUserId -> [{ from, fromId, text, at }]
+const lastInboxSender = new Map(); // glassesUserId -> { fromId, fromLabel, exp }
+
+export function registerReplyRoute(botMessageId, recipientId, senderId, senderLabel) {
+  const exp = Date.now() + 86_400_000;
+  const entry = {
+    recipientId: String(recipientId),
+    senderId: String(senderId),
+    senderLabel,
+    exp,
+  };
+  if (botMessageId) replyRoutes.set(String(botMessageId), entry);
+  lastReplyTarget.set(String(recipientId), entry);
+}
+
+export function findReplyRoute(botMessageId) {
+  const key = String(botMessageId ?? "");
+  const entry = replyRoutes.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.exp) {
+    replyRoutes.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+export function getLastReplyTarget(recipientId) {
+  const key = String(recipientId ?? "");
+  const entry = lastReplyTarget.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.exp) {
+    lastReplyTarget.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+export function pushInboxMessage(targetUserId, fromLabel, text, fromId) {
+  const key = String(targetUserId);
+  const cleanText = String(text ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+  if (!cleanText) return;
+  const q = glassesInbox.get(key) || [];
+  q.push({ from: fromLabel, fromId: String(fromId), text: cleanText, at: Date.now() });
+  if (q.length > 10) q.shift();
+  glassesInbox.set(key, q);
+  lastInboxSender.set(key, {
+    fromId: String(fromId),
+    fromLabel,
+    exp: Date.now() + 86_400_000,
+  });
+}
+
+export function popInboxMessage(userId) {
+  const key = String(userId);
+  const q = glassesInbox.get(key);
+  if (!q || !q.length) return null;
+  return q.shift();
+}
+
+export function getLastInboxSender(userId) {
+  const key = String(userId);
+  const entry = lastInboxSender.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.exp) {
+    lastInboxSender.delete(key);
+    return null;
+  }
+  return entry;
 }
 
 const inviteDrafts = new Map();
@@ -285,7 +357,21 @@ export function parseCommand(text) {
     return { type: "price" };
   }
 
-  // 5) Buy someone a coffee
+  // 5) Telegram quick message / reply
+  const tellMatch = raw.match(/^(?:tell|message|text)\s+@?([a-z0-9_]+)\s+(?:that\s+)?(.+)$/i);
+  if (tellMatch && tellMatch[2].trim()) {
+    return { type: "message", name: tellMatch[1], body: tellMatch[2].trim() };
+  }
+  const replyToMatch = raw.match(/^reply\s+to\s+@?([a-z0-9_]+)\s*[:,-]?\s+(.+)$/i);
+  if (replyToMatch && replyToMatch[2].trim()) {
+    return { type: "message", name: replyToMatch[1], body: replyToMatch[2].trim() };
+  }
+  const replyOnlyMatch = raw.match(/^reply\s*[:,-]?\s+(.+)$/i);
+  if (replyOnlyMatch && replyOnlyMatch[1].trim()) {
+    return { type: "message", name: "", body: replyOnlyMatch[1].trim() };
+  }
+
+  // 6) Buy someone a coffee
   const coffeeA = t.match(/\b(?:buy|get|treat|send)\s+@?([a-z0-9_]+)\s+(a|an|one|two|three|four|five|\d+)\s+coffees?\b/);
   if (coffeeA) {
     const count = Math.round(extractAmount(coffeeA[2]) || 1);
@@ -297,7 +383,7 @@ export function parseCommand(text) {
     if (count > 0) return { type: "coffee", count, name: coffeeB[2] };
   }
 
-  // 6) Payment request (TON/GRAM or USD)
+  // 7) Payment request (TON/GRAM or USD)
   const askMatch = t.match(/\b(?:ask|request)\s+@?([a-z0-9_]+)\s+(?:for|to send|to pay)\s+(.+)$/);
   if (askMatch) {
     const amount = extractAmount(askMatch[2]);
@@ -313,7 +399,7 @@ export function parseCommand(text) {
     }
   }
 
-  // 7) Tip command: "send 1 ton/gram to Alex" OR "send Alex 1 ton/gram"
+  // 8) Tip command: "send 1 ton/gram to Alex" OR "send Alex 1 ton/gram"
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
@@ -333,7 +419,7 @@ export function parseCommand(text) {
     }
   }
 
-  // 8) Recent transactions
+  // 9) Recent transactions
   if (
     !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
@@ -341,7 +427,7 @@ export function parseCommand(text) {
     return { type: "history" };
   }
 
-  // 9) Wallet balance
+  // 10) Wallet balance
   if (
     !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))
@@ -372,7 +458,6 @@ const norm = (s) =>
     .replace(/[0-9]/g, (d) => LEET[d] ?? "")
     .replace(/[^a-z]/g, "");
 
-// General phonetic normalization for spoken names (runs locally on server)
 function phonetic(s) {
   return norm(s)
     .replace(/ph/g, "f")

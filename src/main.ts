@@ -59,6 +59,7 @@ let cards: string[] = []
 let cardIndex = 0
 let lastCardsFetch = 0
 let showingCard = false
+let inboxBusy = false
 
 try {
   token = localStorage.getItem(TOKEN_KEY) || ''
@@ -203,6 +204,31 @@ async function initSession() {
   }
 }
 
+// Poll for incoming Telegram replies (raw text only, displayed immediately when idle)
+setInterval(() => {
+  if (!token || state !== 'idle' || inboxBusy) return
+  inboxBusy = true
+  void (async () => {
+    try {
+      const res = await postJson('/inbox', {})
+      if (res.ok && res.message && state === 'idle') {
+        showingCard = false
+        await show(
+          'Reply from ' +
+            res.message.from +
+            ':\n"' +
+            res.message.text +
+            '"\n\nTap: reply · Up/Down: cards',
+        )
+      }
+    } catch (e) {
+      if (e instanceof AuthError) await handleExpiredSession()
+    } finally {
+      inboxBusy = false
+    }
+  })()
+}, 4000)
+
 async function doPair() {
   const code = (codeInput?.value || '').trim()
   if (!code) {
@@ -271,7 +297,6 @@ bridge.onEvenHubEvent(async event => {
   const sysType = eventTypeOf(event.sysEvent)
   const textType = eventTypeOf(event.textEvent)
 
-  // Handle OS Menu / background transitions cleanly
   if (sysType === FOREGROUND_EXIT || textType === FOREGROUND_EXIT) {
     if (state === 'listening') {
       clearTimers()
@@ -290,7 +315,6 @@ bridge.onEvenHubEvent(async event => {
     return
   }
 
-  // Up / Down card navigation on Even G2 when idle
   const isUp =
     sysType === OsEventTypeList.SCROLL_TOP_EVENT || textType === OsEventTypeList.SCROLL_TOP_EVENT
   const isDown =
@@ -316,7 +340,6 @@ bridge.onEvenHubEvent(async event => {
     return
   }
 
-  // Double Click: live sync when idle (no black screen), or Cancel when active
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     if (state === 'busy') return
     clearTimers()
@@ -372,7 +395,6 @@ bridge.onEvenHubEvent(async event => {
 
   if (state === 'listening') {
     const total = parts.reduce((n, p) => n + p.length, 0)
-    // Ignore premature release bounce (e.g. simulator Long Press 800ms hold)
     if (Date.now() - listenStartedAt < MIN_LISTEN_GUARD_MS && total < 3200) {
       return
     }
@@ -419,7 +441,9 @@ bridge.onEvenHubEvent(async event => {
           ? 'Tap = send invite'
           : cmd.type === 'ask'
             ? 'Tap = send request'
-            : 'Tap = confirm'
+            : cmd.type === 'message'
+              ? 'Tap = send message'
+              : 'Tap = confirm'
       await show(cmd.summary + '\n\n' + actionLabel + '\n2x Tap = cancel (8s)')
       cancelTimer = setTimeout(() => {
         if (state === 'confirming') idle('Cancelled')
@@ -439,7 +463,7 @@ bridge.onEvenHubEvent(async event => {
       const id = pendingId
       const r = await postJson('/confirm', { id })
       if (!r.ok) return await idle(r.message)
-      if (r.type === 'invite' || r.type === 'ask') {
+      if (r.type === 'invite' || r.type === 'ask' || r.type === 'message') {
         return await idle(r.message || 'Done!')
       }
 
