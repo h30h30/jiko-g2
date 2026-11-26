@@ -98,7 +98,21 @@ export function canonicalAddr(addr) {
   }
 }
 
-const NUM = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, half: 0.5 };
+const NUM = {
+  a: 1,
+  an: 1,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  half: 0.5,
+};
 
 function extractAmount(str) {
   const d = str.match(/\d+(\.\d+)?/);
@@ -109,10 +123,12 @@ function extractAmount(str) {
   return null;
 }
 
+const isUsdText = (str) => /\$|\b(usd|dollars?|bucks?)\b/i.test(str);
+
 // Deterministic fallback parser
 export function parseCommand(text) {
   const raw = (text ?? "").trim();
-  const t = raw.toLowerCase().replace(/[^a-z0-9.@_\s]/g, " ").replace(/\s+/g, " ").trim();
+  const t = raw.toLowerCase().replace(/[^a-z0-9.$@_\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
   // 1) Save note to Notion
@@ -123,7 +139,7 @@ export function parseCommand(text) {
 
   // 2) Smart Notion summary / spending report
   if (
-    /\b(summarize|summary|analyze|report)\b.*\b(notes?|notion|log|spending|expenses?|tips?)\b/.test(t) ||
+    /\b(summarize|summary|analyze|report)\b.*\b(notes?|notion|log|spending|expenses?|tips?|coffees?)\b/.test(t) ||
     /\bhow much\b.*\b(spend|spent|tip|tipped|sent)\b/.test(t) ||
     /\btotal\b.*\b(spent|spending|tips?|expenses?)\b/.test(t)
   ) {
@@ -135,40 +151,66 @@ export function parseCommand(text) {
     return { type: "notes" };
   }
 
-  // 4) Payment request
+  // 4) Live TON/USD price
+  if (
+    /\b(ton|toncoin)\b.*\b(price|rate|worth|usd|dollars?)\b/.test(t) ||
+    /\b(price|rate)\b.*\b(ton|toncoin)\b/.test(t)
+  ) {
+    return { type: "price" };
+  }
+
+  // 5) Buy someone a coffee: "buy Hessi a coffee" / "buy 2 coffees for Hessi"
+  const coffeeA = t.match(/\b(?:buy|get|treat|send)\s+@?([a-z0-9_]+)\s+(a|an|one|two|three|four|five|\d+)\s+coffees?\b/);
+  if (coffeeA) {
+    const count = Math.round(extractAmount(coffeeA[2]) || 1);
+    if (count > 0) return { type: "coffee", count, name: coffeeA[1] };
+  }
+  const coffeeB = t.match(/\b(?:buy|get|send)\s+(a|an|one|two|three|four|five|\d+)\s+coffees?\s+(?:for|to)\s+@?([a-z0-9_]+)/);
+  if (coffeeB) {
+    const count = Math.round(extractAmount(coffeeB[1]) || 1);
+    if (count > 0) return { type: "coffee", count, name: coffeeB[2] };
+  }
+
+  // 6) Payment request (GRAM or USD)
   const askMatch = t.match(/\b(?:ask|request)\s+@?([a-z0-9_]+)\s+(?:for|to send|to pay)\s+(.+)$/);
   if (askMatch) {
     const amount = extractAmount(askMatch[2]);
-    if (amount > 0) return { type: "ask", amount, name: askMatch[1] };
+    if (amount > 0) {
+      return { type: "ask", amount, unit: isUsdText(askMatch[2]) ? "usd" : "gram", name: askMatch[1] };
+    }
   }
   const reqFromMatch = t.match(/\b(?:ask|request)\s+(.+?)\s+from\s+@?([a-z0-9_]+)$/);
   if (reqFromMatch) {
     const amount = extractAmount(reqFromMatch[1]);
-    if (amount > 0) return { type: "ask", amount, name: reqFromMatch[2] };
+    if (amount > 0) {
+      return { type: "ask", amount, unit: isUsdText(reqFromMatch[1]) ? "usd" : "gram", name: reqFromMatch[2] };
+    }
   }
 
-  // 5) Tip command
+  // 7) Tip command (GRAM or USD)
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
     const name = t.slice(i + 4).replace(/^@/, "").replace(/\.+$/, "").trim();
     if (/\b(send|tip|give|pay)\b/.test(left) && name) {
       const amount = extractAmount(left);
-      if (amount > 0) return { type: "tip", amount, name };
+      if (amount > 0) {
+        return { type: "tip", amount, unit: isUsdText(left) ? "usd" : "gram", name };
+      }
     }
   }
 
-  // 6) Recent transactions
+  // 8) Recent transactions (still available by voice)
   if (
-    !/\b(send|tip|give|pay|ask|request)\b/.test(t) &&
+    !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
   ) {
     return { type: "history" };
   }
 
-  // 7) Wallet balance
+  // 9) Wallet balance
   if (
-    !/\b(send|tip|give|pay|ask|request)\b/.test(t) &&
+    !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))
   ) {
     return { type: "balance" };

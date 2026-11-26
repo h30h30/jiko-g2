@@ -22,11 +22,22 @@ import {
 
 const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3-turbo";
 const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "openai/gpt-oss-20b";
+export const COFFEE_PRICE_USD = Number(process.env.COFFEE_PRICE_USD) || 5;
+const MAX_TESTNET_GRAM = 25;
+
+export function getUserCoffeeUsd(userId) {
+  const custom = Number(load()[String(userId)]?.coffeeUsd);
+  return Number.isFinite(custom) && custom > 0 ? custom : COFFEE_PRICE_USD;
+}
+
 const TONCENTER_TX = "https://testnet.toncenter.com/api/v2/getTransactions";
 const TONCENTER_BAL = "https://testnet.toncenter.com/api/v2/getAddressBalance";
+
 const pending = new Map();
 const watching = new Map();
 const pairCodes = new Map();
+const balanceCache = new Map();
+let tonPriceCache = null;
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -72,6 +83,58 @@ function wavFromPcm(pcm) {
   return Buffer.concat([h, pcm]);
 }
 
+// Live TON/USD fetcher with 60s cache and 3 free public fallbacks (no API key needed)
+export async function fetchTonPriceUsd(force = false) {
+  if (!force && tonPriceCache && Date.now() - tonPriceCache.at < 60_000) {
+    return tonPriceCache.price;
+  }
+  const t0 = Date.now();
+  const sources = [
+    {
+      name: "TonAPI",
+      url: "https://tonapi.io/v2/rates?tokens=ton&currencies=usd",
+      pick: (j) => Number(j?.rates?.TON?.prices?.USD),
+    },
+    {
+      name: "CoinGecko",
+      url: "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd",
+      pick: (j) => Number(j?.["the-open-network"]?.usd),
+    },
+    {
+      name: "Kraken",
+      url: "https://api.kraken.com/0/public/Ticker?pair=TONUSD",
+      pick: (j) => Number(Object.values(j?.result ?? {})[0]?.c?.[0]),
+    },
+  ];
+
+  for (const src of sources) {
+    try {
+      const r = await fetch(src.url, { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) continue;
+      const json = await r.json();
+      const price = src.pick(json);
+      if (Number.isFinite(price) && price > 0) {
+        tonPriceCache = { price, at: Date.now() };
+        console.log(`[TIMING] TON/USD (${src.name}): $${price.toFixed(2)} in ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+        return price;
+      }
+    } catch {
+      // try next fallback source
+    }
+  }
+
+  if (tonPriceCache) return tonPriceCache.price;
+  throw new Error("Could not fetch live TON/USD price");
+}
+
+function usdToGram(usd, tonPrice) {
+  return Math.max(0.01, Number((usd / tonPrice).toFixed(2)));
+}
+
+function fmtUsd(usd) {
+  return "$" + Number(usd).toFixed(usd % 1 === 0 ? 0 : 2);
+}
+
 async function transcribe(pcm) {
   if (!process.env.GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY");
   const t0 = Date.now();
@@ -108,16 +171,18 @@ async function understandVoice(transcript) {
   const systemPrompt =
     "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON crypto tip wallet and Notion workspace.\n" +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
-    '1) Sending money/tip: {"type":"tip","amount":<number>,"name":"<recipient name>"}\n' +
-    '2) Requesting money from someone: {"type":"ask","amount":<number>,"name":"<payer name>"}\n' +
-    '3) Checking wallet balance: {"type":"balance"}\n' +
-    '4) Checking recent TON transactions/activity: {"type":"history"}\n' +
-    '5) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
-    '6) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
-    '7) Summarizing, analyzing, or asking questions about Notion notes, tasks, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
-    '8) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
+    '1) Sending money/tip in GRAM/TON or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
+    '2) Buying someone coffee(s) (e.g. "buy Hessi a coffee", "get Alex 2 coffees"): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
+    '3) Requesting money from someone in GRAM/TON or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
+    '4) Checking live TON/USD price: {"type":"price"}\n' +
+    '5) Checking wallet balance: {"type":"balance"}\n' +
+    '6) Checking recent TON transactions/activity: {"type":"history"}\n' +
+    '7) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
+    '8) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
+    '9) Summarizing, analyzing, or asking questions about Notion notes, tasks, coffees, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
+    '10) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
     "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown. " +
-    "IMPORTANT: Never guess or invent live real-time crypto prices, stock prices, or current weather; if asked for live market prices or current weather, briefly say live data is not connected yet.";
+    "IMPORTANT: Never guess live prices for other coins (like BTC/ETH) or current weather; if asked for live data other than TON/USD, briefly say only live TON/USD is connected.";
 
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -144,10 +209,16 @@ async function understandVoice(transcript) {
     console.log(`[TIMING] Groq AI intent (${parsed.type}): ${((Date.now() - t0) / 1000).toFixed(2)}s`);
 
     if (parsed.type === "tip" && Number(parsed.amount) > 0 && parsed.name) {
-      return { type: "tip", amount: Number(parsed.amount), name: String(parsed.name).trim() };
+      const unit = String(parsed.unit || "gram").toLowerCase() === "usd" ? "usd" : "gram";
+      return { type: "tip", amount: Number(parsed.amount), unit, name: String(parsed.name).trim() };
+    }
+    if (parsed.type === "coffee" && parsed.name) {
+      const count = Math.max(1, Math.min(10, Math.round(Number(parsed.count) || 1)));
+      return { type: "coffee", count, name: String(parsed.name).trim() };
     }
     if (parsed.type === "ask" && Number(parsed.amount) > 0 && parsed.name) {
-      return { type: "ask", amount: Number(parsed.amount), name: String(parsed.name).trim() };
+      const unit = String(parsed.unit || "gram").toLowerCase() === "usd" ? "usd" : "gram";
+      return { type: "ask", amount: Number(parsed.amount), unit, name: String(parsed.name).trim() };
     }
     if (parsed.type === "note" && parsed.content) {
       return { type: "note", content: String(parsed.content).trim() };
@@ -155,7 +226,12 @@ async function understandVoice(transcript) {
     if (parsed.type === "notion_summary") {
       return { type: "notion_summary", question: String(parsed.question || transcript).trim() };
     }
-    if (parsed.type === "balance" || parsed.type === "history" || parsed.type === "notes") {
+    if (
+      parsed.type === "price" ||
+      parsed.type === "balance" ||
+      parsed.type === "history" ||
+      parsed.type === "notes"
+    ) {
       return { type: parsed.type };
     }
     if (parsed.type === "answer" && parsed.reply) {
@@ -168,7 +244,6 @@ async function understandVoice(transcript) {
   return parseCommand(transcript);
 }
 
-// Feature 1: Smart AI analysis & spending summary from Notion workspace
 async function summarizeNotion(question) {
   const entries = await fetchNotionEntriesData(25);
   if (!entries.length) return "Notion log is empty.";
@@ -187,8 +262,10 @@ async function summarizeNotion(question) {
     }
   }
 
+  const tonPrice = await fetchTonPriceUsd().catch(() => null);
+  const usdSuffix = tonPrice ? ` (~$${(totalGram * tonPrice).toFixed(2)})` : "";
   const fallback =
-    `Notion summary:\nTips: ${tipCount} (${totalGram.toFixed(2)} GRAM)\nNotes: ${noteCount}`;
+    `Notion summary:\nTips: ${tipCount} (${totalGram.toFixed(2)} GRAM${usdSuffix})\nNotes: ${noteCount}`;
 
   if (!process.env.GROQ_API_KEY) return fallback;
 
@@ -200,7 +277,7 @@ async function summarizeNotion(question) {
   const prompt =
     "You are Jiko on Even G2 smart glasses. Answer the user's question using ONLY the Notion workspace entries and exact pre-calculated stats below.\n" +
     "Format rules: max 4 short lines (under 140 characters total), plain text only, no markdown, no emojis, no invented facts.\n\n" +
-    `Exact stats: ${tipCount} tips totaling ${totalGram.toFixed(2)} GRAM; ${noteCount} notes.\n` +
+    `Exact stats: ${tipCount} tips totaling ${totalGram.toFixed(2)} GRAM${usdSuffix}; ${noteCount} notes.\n` +
     `Entries (newest first):\n${listText}`;
 
   try {
@@ -231,19 +308,48 @@ async function summarizeNotion(question) {
   }
 }
 
-async function fetchBalance(address) {
-  const t0 = Date.now();
-  const r = await fetch(TONCENTER_BAL + "?address=" + encodeURIComponent(address));
-  if (!r.ok) throw new Error("Toncenter " + r.status);
-  const json = await r.json();
-  if (!json.ok) throw new Error(json.error || "Toncenter error");
-  console.log(`[TIMING] Toncenter balance: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
-  return (Number(json.result) / 1e9).toFixed(2);
+// Cached + auto-retry Toncenter balance fetcher (avoids 1 req/sec rate limit errors)
+async function fetchBalance(address, force = false) {
+  const cached = balanceCache.get(address);
+  if (!force && cached && Date.now() - cached.at < 15_000) {
+    return cached.val;
+  }
+
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1100));
+    try {
+      const t0 = Date.now();
+      const r = await fetch(TONCENTER_BAL + "?address=" + encodeURIComponent(address), {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) {
+        lastErr = new Error("Toncenter " + r.status);
+        continue;
+      }
+      const json = await r.json();
+      if (!json.ok) {
+        lastErr = new Error(json.error || "Toncenter error");
+        continue;
+      }
+      const val = (Number(json.result) / 1e9).toFixed(2);
+      balanceCache.set(address, { val, at: Date.now() });
+      console.log(`[TIMING] Toncenter balance: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+      return val;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  if (cached) return cached.val;
+  throw lastErr || new Error("Toncenter balance unavailable");
 }
 
 async function fetchHistory(address) {
   const t0 = Date.now();
-  const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(address) + "&limit=6");
+  const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(address) + "&limit=6", {
+    signal: AbortSignal.timeout(5000),
+  });
   if (!r.ok) throw new Error("Toncenter " + r.status);
   const json = await r.json();
   if (!json.ok || !Array.isArray(json.result)) throw new Error(json.error || "Toncenter error");
@@ -266,25 +372,31 @@ async function fetchHistory(address) {
   return "Recent activity:\n" + lines.join("\n");
 }
 
-// Feature 5: Build 3 glanceable cards for Even G2 Up/Down navigation
+// 3 reliable cards: 1/3 Welcome · 2/3 Wallet + TON/USD · 3/3 Notion
 async function buildCards(address) {
-  const [balRes, histRes, notionRes] = await Promise.allSettled([
+  const [balRes, priceRes, notionRes] = await Promise.allSettled([
     fetchBalance(address),
-    fetchHistory(address),
+    fetchTonPriceUsd(),
     isNotionEnabled() ? fetchRecentNotionEntries(3) : Promise.resolve("__DISABLED__"),
   ]);
 
-  const bal = balRes.status === "fulfilled" ? balRes.value : null;
   const card1 =
-    "Jiko · 1/3 Wallet\n" +
-    "Balance: " + (bal ?? "--") + " GRAM\n" +
-    short(address) + " (testnet)";
+    "Jiko · 1/3 Home\n" +
+    "Voice AI · TON · Notion\n" +
+    'Try: "Buy Alex a coffee"\n' +
+    'or "Note: call team"';
 
-  let card2 = "Activity · 2/3\nCould not load activity";
-  if (histRes.status === "fulfilled") {
-    const body = histRes.value.replace(/^Recent activity:\n?/i, "");
-    card2 = "Activity · 2/3\n" + body;
+  const bal = balRes.status === "fulfilled" ? balRes.value : null;
+  const tonPrice = priceRes.status === "fulfilled" ? priceRes.value : null;
+
+  let balLine = "Balance: " + (bal ?? "--") + " GRAM";
+  if (bal && tonPrice) {
+    balLine = bal + " GRAM (~$" + (Number(bal) * tonPrice).toFixed(2) + ")";
   }
+  const rateLine = tonPrice ? "TON: $" + tonPrice.toFixed(2) + " (live)" : short(address) + " (testnet)";
+  const addrLine = tonPrice ? short(address) + " (testnet)" : "";
+
+  const card2 = ["Wallet · 2/3", balLine, rateLine, addrLine].filter(Boolean).join("\n");
 
   let card3 = "Notion · 3/3\nCould not load notes";
   if (notionRes.status === "fulfilled") {
@@ -357,14 +469,22 @@ async function checkWatches(bot) {
       );
       if (!found) continue;
       w.status = "sent";
+      balanceCache.delete(w.senderAddr);
+      if (w.recipientAddr) balanceCache.delete(w.recipientAddr);
+
+      const extraTag = w.noteTag
+        ? ` (${w.noteTag}${w.usdDisplay ? " · " + w.usdDisplay : ""})`
+        : w.usdDisplay
+          ? ` (${w.usdDisplay})`
+          : "";
 
       let notionSuffix = "";
       if (isNotionEnabled()) {
         try {
           await saveNotionEntry({
             kind: "tip",
-            title: `Tip: ${w.amount} GRAM -> ${w.label}`,
-            details: `From ${w.senderLabel} to ${w.label} · ${w.amount} GRAM (TON Testnet) · Logged automatically by Jiko`,
+            title: `Tip: ${w.amount} GRAM -> ${w.label}${extraTag}`,
+            details: `From ${w.senderLabel} to ${w.label} · ${w.amount} GRAM${extraTag} (TON Testnet) · Logged automatically by Jiko`,
           });
           notionSuffix = "\n📒 Logged to Notion.";
         } catch (e) {
@@ -372,14 +492,17 @@ async function checkWatches(bot) {
         }
       }
 
-      await notify(bot, w, "✅ Sent " + w.amount + " GRAM to " + w.label + " (testnet)." + notionSuffix);
+      const sentHeadline = w.coffeeCount
+        ? `☕ Bought ${w.label} ${w.coffeeCount} ${w.coffeeCount > 1 ? "coffees" : "coffee"} (${w.amount} GRAM · ${w.usdDisplay}).`
+        : `✅ Sent ${w.amount} GRAM${w.usdDisplay ? " (" + w.usdDisplay + ")" : ""} to ${w.label} (testnet).`;
+
+      await notify(bot, w, sentHeadline + notionSuffix);
+
       if (w.recipientId && String(w.recipientId) !== String(w.senderId)) {
-        await bot.api
-          .sendMessage(
-            w.recipientId,
-            "💸 You received " + w.amount + " GRAM from " + w.senderLabel + " (testnet)."
-          )
-          .catch(() => {});
+        const rxMsg = w.coffeeCount
+          ? `☕ ${w.senderLabel} bought you ${w.coffeeCount} ${w.coffeeCount > 1 ? "coffees" : "coffee"} (${w.amount} GRAM · ${w.usdDisplay}, testnet)!`
+          : `💸 You received ${w.amount} GRAM from ${w.senderLabel} (testnet).`;
+        await bot.api.sendMessage(w.recipientId, rxMsg).catch(() => {});
       }
     } catch (e) {
       console.error("WATCH ERROR:", e.message);
@@ -415,7 +538,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
         return res.end();
       }
       if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
-        return reply(res, 200, { ok: true, service: "jiko", notion: isNotionEnabled() });
+        return reply(res, 200, { ok: true, service: "jiko", notion: isNotionEnabled(), coffeeUsd: COFFEE_PRICE_USD });
       }
       if (req.method !== "POST") {
         res.writeHead(404);
@@ -508,8 +631,31 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: "Didn't get that.\nTry: send 1 gram to Alex,\nnote: call Ali, or ask anything",
+              message: 'Didn\'t get that.\nTry: "Buy Alex a coffee",\n"Send $5 to Alex", or "Note: ..."',
             });
+          }
+
+          // Live TON/USD price (uses user's custom coffee price)
+          if (cmd.type === "price") {
+            try {
+              const price = await fetchTonPriceUsd(true);
+              const coffeeUsd = getUserCoffeeUsd(senderId);
+              const coffeeGram = usdToGram(coffeeUsd, price);
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                refreshCards: true,
+                message:
+                  `TON/USD: $${price.toFixed(2)}\n` +
+                  `1 coffee (${fmtUsd(coffeeUsd)}) = ${coffeeGram} GRAM`,
+              });
+            } catch (e) {
+              console.error("PRICE ERROR:", e.message);
+              return reply(res, 200, {
+                ok: false,
+                message: "Could not fetch live TON price.\nTry again.",
+              });
+            }
           }
 
           // Save voice note directly to Notion
@@ -600,7 +746,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Balance check
+          // Balance check (with live USD value)
           if (cmd.type === "balance") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -610,13 +756,18 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               });
             }
             try {
-              const bal = await fetchBalance(me.address);
+              const [bal, tonPrice] = await Promise.all([
+                fetchBalance(me.address, true),
+                fetchTonPriceUsd().catch(() => null),
+              ]);
+              const usdPart = tonPrice ? ` (~$${(Number(bal) * tonPrice).toFixed(2)})` : "";
+              const ratePart = tonPrice ? `\nTON: $${tonPrice.toFixed(2)}` : "";
               return reply(res, 200, {
                 ok: true,
                 type: "balance",
                 balance: bal,
                 refreshCards: true,
-                message: "Balance: " + bal + " GRAM\nWallet: " + short(me.address) + "\n(testnet)",
+                message: `Balance: ${bal} GRAM${usdPart}${ratePart}\n${short(me.address)} (testnet)`,
               });
             } catch (e) {
               console.error("BALANCE ERROR:", e.message);
@@ -627,7 +778,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Recent transactions
+          // Recent transactions (voice-only)
           if (cmd.type === "history") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -641,7 +792,6 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, {
                 ok: true,
                 type: "history",
-                refreshCards: true,
                 message: msg,
               });
             } catch (e) {
@@ -653,9 +803,25 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Payment request
+          // Payment request (GRAM or USD)
           if (cmd.type === "ask") {
-            if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
+            let amountGram = cmd.amount;
+            let usdDisplay = "";
+            if (cmd.unit === "usd") {
+              const tonPrice = await fetchTonPriceUsd().catch(() => null);
+              if (!tonPrice) {
+                return reply(res, 200, { ok: false, message: "Live TON price unavailable.\nSay amount in GRAM." });
+              }
+              amountGram = usdToGram(cmd.amount, tonPrice);
+              usdDisplay = fmtUsd(cmd.amount);
+            } else {
+              const tonPrice = await fetchTonPriceUsd().catch(() => null);
+              if (tonPrice) usdDisplay = "~$" + (amountGram * tonPrice).toFixed(2);
+            }
+
+            if (amountGram > MAX_TESTNET_GRAM) {
+              return reply(res, 200, { ok: false, message: `Max ${MAX_TESTNET_GRAM} GRAM (testnet)` });
+            }
             const payer = findRecipient(cmd.name);
             if (payer?.ambiguous) {
               return reply(res, 200, {
@@ -668,17 +834,47 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
             const id = crypto.randomBytes(8).toString("hex");
             const label = payer.username ? "@" + payer.username : payer.first_name || cmd.name;
-            pending.set(id, { kind: "ask", senderId, payer, amount: cmd.amount, label, at: Date.now() });
+            pending.set(id, { kind: "ask", senderId, payer, amount: amountGram, usdDisplay, label, at: Date.now() });
             return reply(res, 200, {
               ok: true,
               type: "ask",
               id,
-              summary: "Ask " + label + " for\n" + cmd.amount + " GRAM?",
+              summary: `Ask ${label} for\n${amountGram} GRAM${usdDisplay ? " (" + usdDisplay + ")" : ""}?`,
             });
           }
 
-          // Tip command
-          if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
+          // Buy someone a coffee OR Tip (GRAM / USD)
+          let amountGram = cmd.amount;
+          let usdDisplay = "";
+          let coffeeCount = 0;
+          let noteTag = "";
+
+          if (cmd.type === "coffee") {
+            coffeeCount = cmd.count || 1;
+            const totalUsd = coffeeCount * getUserCoffeeUsd(senderId);
+            const tonPrice = await fetchTonPriceUsd().catch(() => null);
+            if (!tonPrice) {
+              return reply(res, 200, { ok: false, message: "Live TON price unavailable.\nTry again." });
+            }
+            amountGram = usdToGram(totalUsd, tonPrice);
+            usdDisplay = fmtUsd(totalUsd);
+            noteTag = `Coffee x${coffeeCount}`;
+          } else if (cmd.unit === "usd") {
+            const tonPrice = await fetchTonPriceUsd().catch(() => null);
+            if (!tonPrice) {
+              return reply(res, 200, { ok: false, message: "Live TON price unavailable.\nSay amount in GRAM." });
+            }
+            amountGram = usdToGram(cmd.amount, tonPrice);
+            usdDisplay = fmtUsd(cmd.amount);
+          } else {
+            const tonPrice = await fetchTonPriceUsd().catch(() => null);
+            if (tonPrice) usdDisplay = "~$" + (amountGram * tonPrice).toFixed(2);
+          }
+
+          if (amountGram > MAX_TESTNET_GRAM) {
+            return reply(res, 200, { ok: false, message: `Max ${MAX_TESTNET_GRAM} GRAM (testnet)` });
+          }
+
           const user = findRecipient(cmd.name);
           if (user?.ambiguous) {
             return reply(res, 200, {
@@ -693,25 +889,40 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               kind: "invite",
               senderId,
               targetName: cmd.name,
-              amount: cmd.amount,
+              amount: amountGram,
               at: Date.now(),
             });
             return reply(res, 200, {
               ok: true,
               type: "invite",
               id,
-              summary: 'No wallet for "' + cmd.name + '".\nSend invite (' + cmd.amount + " GRAM)?",
+              summary: 'No wallet for "' + cmd.name + '".\nSend invite (' + amountGram + " GRAM)?",
             });
           }
 
           const id = crypto.randomBytes(8).toString("hex");
           const label = user.username ? "@" + user.username : user.first_name || cmd.name;
-          pending.set(id, { kind: "tip", senderId, user, amount: cmd.amount, label, at: Date.now() });
+          pending.set(id, {
+            kind: "tip",
+            senderId,
+            user,
+            amount: amountGram,
+            usdDisplay,
+            coffeeCount,
+            noteTag,
+            label,
+            at: Date.now(),
+          });
+
+          const summary = coffeeCount
+            ? `Buy ${label} ${coffeeCount} ${coffeeCount > 1 ? "coffees" : "coffee"}?\n${amountGram} GRAM (${usdDisplay})`
+            : `Send ${amountGram} GRAM${usdDisplay ? " (" + usdDisplay + ")" : ""}\nto ${label}?`;
+
           return reply(res, 200, {
             ok: true,
             type: "tip",
             id,
-            summary: "Send " + cmd.amount + " GRAM to\n" + label + "?",
+            summary,
           });
         }
 
@@ -751,10 +962,11 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, { ok: false, message: "Link your wallet first" });
             }
             const requesterLabel = userLabel(me);
+            const usdPart = p.usdDisplay ? ` (${p.usdDisplay})` : "";
             const sentToPayer = await bot.api
               .sendMessage(
                 p.payer.id,
-                "💸 " + requesterLabel + " requested " + p.amount + " GRAM from you (testnet).\nValid for 5 minutes.",
+                `💸 ${requesterLabel} requested ${p.amount} GRAM${usdPart} from you (testnet).\nValid for 5 minutes.`,
                 {
                   reply_markup: new InlineKeyboard().webApp(
                     "Review & sign",
@@ -777,6 +989,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
                 recipientAddr: me.address,
                 nano: String(Math.round(p.amount * 1e9)),
                 amount: p.amount,
+                usdDisplay: p.usdDisplay || "",
                 label: requesterLabel,
                 messageId: sentToPayer.message_id,
                 since: Date.now(),
@@ -785,7 +998,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
 
             await bot.api
-              .sendMessage(senderId, "📩 Sent payment request (" + p.amount + " GRAM) to " + p.label + ".")
+              .sendMessage(senderId, `📩 Sent payment request (${p.amount} GRAM${usdPart}) to ${p.label}.`)
               .catch(() => {});
 
             return reply(res, 200, {
@@ -795,11 +1008,13 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          const sent = await bot.api.sendMessage(
-            senderId,
-            "Tip " + p.amount + " GRAM to " + p.label + "?\nValid for 5 minutes.",
-            { reply_markup: new InlineKeyboard().webApp("Review & sign", payLink(p.user, p.amount, id)) }
-          );
+          const promptText = p.coffeeCount
+            ? `☕ Buy ${p.label} ${p.coffeeCount} ${p.coffeeCount > 1 ? "coffees" : "coffee"} (${p.amount} GRAM · ${p.usdDisplay})?\nValid for 5 minutes.`
+            : `Tip ${p.amount} GRAM${p.usdDisplay ? " (" + p.usdDisplay + ")" : ""} to ${p.label}?\nValid for 5 minutes.`;
+
+          const sent = await bot.api.sendMessage(senderId, promptText, {
+            reply_markup: new InlineKeyboard().webApp("Review & sign", payLink(p.user, p.amount, id)),
+          });
           const me = load()[senderId];
           if (me?.address) {
             watching.set(id, {
@@ -810,6 +1025,9 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               recipientAddr: p.user.address,
               nano: String(Math.round(p.amount * 1e9)),
               amount: p.amount,
+              usdDisplay: p.usdDisplay || "",
+              coffeeCount: p.coffeeCount || 0,
+              noteTag: p.noteTag || "",
               label: p.label,
               messageId: sent.message_id,
               since: Date.now(),
