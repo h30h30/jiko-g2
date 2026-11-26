@@ -11,7 +11,6 @@ export const setBotUsername = (name) => {
   if (name) botUsername = name;
 };
 
-// Shared in-memory store for unregistered recipient invites
 const inviteDrafts = new Map();
 const pendingInvites = [];
 
@@ -38,7 +37,7 @@ export function addPendingInvite(senderId, targetUsername, amount) {
     senderId: String(senderId),
     targetUsername: targetUsername.toLowerCase().replace(/^@/, ""),
     amount,
-    exp: Date.now() + 86_400_000, // 24 hours
+    exp: Date.now() + 86_400_000,
   });
 }
 
@@ -82,7 +81,6 @@ export function revokeUserSessions(userId) {
 
 export const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
 
-// Normalises TON addresses (EQ/UQ/kQ/0Q or raw 0:hex) so they can be compared reliably
 export function canonicalAddr(addr) {
   if (!addr || typeof addr !== "string") return "";
   const s = addr.trim();
@@ -111,12 +109,33 @@ function extractAmount(str) {
   return null;
 }
 
-// Deterministic fallback parser for tip, payment request (ask), history, and balance
+// Deterministic fallback parser
 export function parseCommand(text) {
-  const t = text.toLowerCase().replace(/[^a-z0-9.@_\s]/g, " ").replace(/\s+/g, " ").trim();
+  const raw = (text ?? "").trim();
+  const t = raw.toLowerCase().replace(/[^a-z0-9.@_\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // 1) Payment request: "ask Alex for 2 gram" or "request 2 gram from Alex"
+  // 1) Save note to Notion
+  const noteMatch = raw.match(/^(?:take a note|save a note|add a note|note|remember to|remind me to)\s*[:,-]?\s+(.+)$/i);
+  if (noteMatch && noteMatch[1].trim()) {
+    return { type: "note", content: noteMatch[1].trim() };
+  }
+
+  // 2) Smart Notion summary / spending report
+  if (
+    /\b(summarize|summary|analyze|report)\b.*\b(notes?|notion|log|spending|expenses?|tips?)\b/.test(t) ||
+    /\bhow much\b.*\b(spend|spent|tip|tipped|sent)\b/.test(t) ||
+    /\btotal\b.*\b(spent|spending|tips?|expenses?)\b/.test(t)
+  ) {
+    return { type: "notion_summary", question: raw };
+  }
+
+  // 3) Read recent Notion notes
+  if (/\b(show|read|list|check|my)\b.*\b(notes?|notion)\b/.test(t)) {
+    return { type: "notes" };
+  }
+
+  // 4) Payment request
   const askMatch = t.match(/\b(?:ask|request)\s+@?([a-z0-9_]+)\s+(?:for|to send|to pay)\s+(.+)$/);
   if (askMatch) {
     const amount = extractAmount(askMatch[2]);
@@ -128,7 +147,7 @@ export function parseCommand(text) {
     if (amount > 0) return { type: "ask", amount, name: reqFromMatch[2] };
   }
 
-  // 2) Tip command: "send 1 gram to Alex"
+  // 5) Tip command
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
@@ -139,7 +158,7 @@ export function parseCommand(text) {
     }
   }
 
-  // 3) Recent transactions / activity command
+  // 6) Recent transactions
   if (
     !/\b(send|tip|give|pay|ask|request)\b/.test(t) &&
     /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
@@ -147,7 +166,7 @@ export function parseCommand(text) {
     return { type: "history" };
   }
 
-  // 4) Wallet balance command
+  // 7) Wallet balance
   if (
     !/\b(send|tip|give|pay|ask|request)\b/.test(t) &&
     (/\b(balance|wallet)\b/.test(t) || /\bhow (much|many)\b/.test(t))

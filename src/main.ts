@@ -40,7 +40,7 @@ const show = (text: string) =>
     new TextContainerUpgrade({ containerID: 1, containerName: 'main', content: text }),
   )
 
-// Companion UI elements (in root index.html)
+// Companion UI elements
 const pairView = document.getElementById('pair-view')
 const pairedView = document.getElementById('paired-view')
 const codeInput = document.getElementById('code-input') as HTMLInputElement | null
@@ -51,6 +51,11 @@ const unpairBtn = document.getElementById('unpair-btn') as HTMLButtonElement | n
 
 let token = ''
 let liveBalance = ''
+let cards: string[] = []
+let cardIndex = 0
+let lastCardsFetch = 0
+let showingCard = false
+
 try {
   token = localStorage.getItem(TOKEN_KEY) || ''
 } catch {
@@ -118,20 +123,49 @@ function clearTimers() {
 
 const homeHeader = () => (liveBalance ? 'Jiko · ' + liveBalance + ' GRAM' : 'Jiko')
 
+async function renderCurrentCard() {
+  showingCard = true
+  const body = cards[cardIndex] || homeHeader()
+  await show(body + '\n\nUp/Down: cards · Tap: talk')
+}
+
+async function refreshCards(renderIfShowing = false) {
+  if (!token) return
+  try {
+    const res = await postJson('/cards', {})
+    if (res.ok && Array.isArray(res.cards) && res.cards.length) {
+      cards = res.cards
+      if (res.balance) liveBalance = String(res.balance)
+      lastCardsFetch = Date.now()
+      if (renderIfShowing && state === 'idle' && showingCard) {
+        await renderCurrentCard()
+      }
+    }
+  } catch (e) {
+    if (e instanceof AuthError) await handleExpiredSession()
+    else console.error('CARDS ERROR:', e)
+  }
+}
+
 const idle = async (text: string) => {
   state = 'idle'
   pendingId = ''
+  showingCard = false
   clearTimers()
-  await show(text + '\n\nTap to talk')
+  await show(text + '\n\nTap: talk · Up/Down: cards')
 }
 
 async function handleExpiredSession() {
   saveToken('')
   liveBalance = ''
+  cards = []
+  cardIndex = 0
+  lastCardsFetch = 0
+  showingCard = false
   state = 'idle'
   pendingId = ''
   clearTimers()
-  renderUnpaired('Session expired. Send /pair in Telegram.')
+  renderUnpaired()
   await show('Jiko\nPair in phone app\nSend /pair to bot')
 }
 
@@ -145,7 +179,10 @@ async function initSession() {
     const me = await postJson('/me', {})
     if (me.balance) liveBalance = String(me.balance)
     renderPaired(me.label, me.wallet)
-    await show(homeHeader() + '\n\nTap to talk')
+    await show(homeHeader() + '\nLoading cards...')
+    cardIndex = 0
+    await refreshCards(false)
+    await renderCurrentCard()
   } catch (e) {
     if (e instanceof AuthError) {
       await handleExpiredSession()
@@ -175,7 +212,9 @@ async function doPair() {
     if (res.balance) liveBalance = String(res.balance)
     if (codeInput) codeInput.value = ''
     renderPaired(res.label, res.wallet)
-    await idle('Paired! (' + res.label + ')' + (liveBalance ? '\nBalance: ' + liveBalance + ' GRAM' : ''))
+    cardIndex = 0
+    await refreshCards(false)
+    await renderCurrentCard()
   } catch (e) {
     console.error(e)
     if (pairMsg) pairMsg.textContent = 'Cannot reach Jiko server.'
@@ -200,6 +239,10 @@ unpairBtn?.addEventListener('click', async () => {
   }
   saveToken('')
   liveBalance = ''
+  cards = []
+  cardIndex = 0
+  lastCardsFetch = 0
+  showingCard = false
   state = 'idle'
   pendingId = ''
   clearTimers()
@@ -217,6 +260,32 @@ bridge.onEvenHubEvent(async event => {
 
   const sysType = eventTypeOf(event.sysEvent)
   const textType = eventTypeOf(event.textEvent)
+
+  // Up / Down card navigation on Even G2 when idle
+  const isUp =
+    sysType === OsEventTypeList.SCROLL_TOP_EVENT || textType === OsEventTypeList.SCROLL_TOP_EVENT
+  const isDown =
+    sysType === OsEventTypeList.SCROLL_BOTTOM_EVENT ||
+    textType === OsEventTypeList.SCROLL_BOTTOM_EVENT
+
+  if ((isUp || isDown) && state === 'idle' && token) {
+    if (!cards.length) {
+      await show('Loading cards...')
+      await refreshCards(false)
+      await renderCurrentCard()
+      return
+    }
+    if (showingCard) {
+      cardIndex = isDown
+        ? (cardIndex + 1) % cards.length
+        : (cardIndex + cards.length - 1) % cards.length
+    }
+    await renderCurrentCard()
+    if (Date.now() - lastCardsFetch > 15_000) {
+      void refreshCards(true)
+    }
+    return
+  }
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     if (state === 'busy') return
@@ -248,6 +317,7 @@ bridge.onEvenHubEvent(async event => {
 
   if (state === 'idle') {
     state = 'listening'
+    showingCard = false
     parts = []
     await bridge.audioControl(true)
     await show('Listening...\nTap to stop (max 15s)')
@@ -287,6 +357,10 @@ bridge.onEvenHubEvent(async event => {
       if (!text) return await idle('Nothing heard')
       const cmd = await postJson('/command', { text })
       if (!cmd.ok) return await idle(cmd.message + '\n\nHeard: "' + text + '"')
+      if (cmd.refreshCards) {
+        lastCardsFetch = 0
+        void refreshCards(false)
+      }
       if (cmd.type === 'balance') {
         if (cmd.balance) liveBalance = String(cmd.balance)
         return await idle(cmd.message)
@@ -333,7 +407,11 @@ bridge.onEvenHubEvent(async event => {
         await new Promise(res => setTimeout(res, 3000))
         if ((state as State) !== 'waiting') return
         const s = await postJson('/status', { id })
-        if (s.status === 'sent') return await idle('Sent!\n' + s.amount + ' GRAM to ' + s.label)
+        if (s.status === 'sent') {
+          lastCardsFetch = 0
+          void refreshCards(false)
+          return await idle('Sent!\n' + s.amount + ' GRAM to ' + s.label)
+        }
         if (s.status === 'cancelled') return await idle('Cancelled in wallet')
         if (s.status === 'expired' || s.status === 'unknown') break
       }

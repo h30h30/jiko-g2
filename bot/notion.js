@@ -106,7 +106,7 @@ export async function saveNotionEntry({ kind = "note", title, details = "" }) {
   return await res.json();
 }
 
-export async function fetchRecentNotionEntries(limit = 3) {
+export async function fetchNotionEntriesData(limit = 25) {
   if (!isNotionEnabled()) throw new Error("Notion not configured");
   const t0 = Date.now();
   const schema = await getDbSchema();
@@ -126,21 +126,39 @@ export async function fetchRecentNotionEntries(limit = 3) {
   }
 
   const json = await res.json();
-  console.log(`[TIMING] Notion query: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+  console.log(`[TIMING] Notion query (${limit}): ${((Date.now() - t0) / 1000).toFixed(2)}s`);
 
-  const lines = [];
+  const entries = [];
   for (const page of json.results ?? []) {
     const titleProp = page.properties?.[schema.titleKey];
-    const text = (titleProp?.title ?? [])
+    const title = (titleProp?.title ?? [])
       .map((t) => t.plain_text ?? "")
       .join("")
       .trim();
-    if (text) {
-      const clipped = text.length > 34 ? text.slice(0, 31) + "..." : text;
-      lines.push("- " + clipped);
-    }
-  }
+    if (!title) continue;
 
-  if (!lines.length) return "Notion log is empty.";
+    let tag = "";
+    if (schema.tagKey && page.properties?.[schema.tagKey]) {
+      const tp = page.properties[schema.tagKey];
+      if (tp.type === "select") tag = tp.select?.name ?? "";
+      else if (tp.type === "multi_select") tag = (tp.multi_select ?? []).map((x) => x.name).join(", ");
+    }
+
+    entries.push({
+      title,
+      tag,
+      date: (page.created_time ?? "").slice(0, 10),
+    });
+  }
+  return entries;
+}
+
+export async function fetchRecentNotionEntries(limit = 3) {
+  const entries = await fetchNotionEntriesData(limit);
+  if (!entries.length) return "Notion log is empty.";
+  const lines = entries.map((e) => {
+    const clipped = e.title.length > 32 ? e.title.slice(0, 29) + "..." : e.title;
+    return "- " + clipped;
+  });
   return "Notion log:\n" + lines.join("\n");
 }

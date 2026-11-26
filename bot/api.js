@@ -13,7 +13,12 @@ import {
   createInviteDraft,
   getBotUsername,
 } from "./core.js";
-import { isNotionEnabled, saveNotionEntry, fetchRecentNotionEntries } from "./notion.js";
+import {
+  isNotionEnabled,
+  saveNotionEntry,
+  fetchNotionEntriesData,
+  fetchRecentNotionEntries,
+} from "./notion.js";
 
 const GROQ_STT_MODEL = process.env.GROQ_STT_MODEL || "whisper-large-v3-turbo";
 const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "openai/gpt-oss-20b";
@@ -108,9 +113,11 @@ async function understandVoice(transcript) {
     '3) Checking wallet balance: {"type":"balance"}\n' +
     '4) Checking recent TON transactions/activity: {"type":"history"}\n' +
     '5) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
-    '6) Reading saved Notion notes or expense log: {"type":"notes"}\n' +
-    '7) Any general question, math calculation, translation, crypto info, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
-    "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown, formatted for a tiny heads-up display.";
+    '6) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
+    '7) Summarizing, analyzing, or asking questions about Notion notes, tasks, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
+    '8) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
+    "Rules for 'answer': max 3 short lines (under 110 characters total), plain text only, no emojis or markdown. " +
+    "IMPORTANT: Never guess or invent live real-time crypto prices, stock prices, or current weather; if asked for live market prices or current weather, briefly say live data is not connected yet.";
 
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -145,6 +152,9 @@ async function understandVoice(transcript) {
     if (parsed.type === "note" && parsed.content) {
       return { type: "note", content: String(parsed.content).trim() };
     }
+    if (parsed.type === "notion_summary") {
+      return { type: "notion_summary", question: String(parsed.question || transcript).trim() };
+    }
     if (parsed.type === "balance" || parsed.type === "history" || parsed.type === "notes") {
       return { type: parsed.type };
     }
@@ -156,6 +166,69 @@ async function understandVoice(transcript) {
   }
 
   return parseCommand(transcript);
+}
+
+// Feature 1: Smart AI analysis & spending summary from Notion workspace
+async function summarizeNotion(question) {
+  const entries = await fetchNotionEntriesData(25);
+  if (!entries.length) return "Notion log is empty.";
+
+  let tipCount = 0;
+  let totalGram = 0;
+  let noteCount = 0;
+
+  for (const e of entries) {
+    const m = e.title.match(/^tip:\s*(\d+(?:\.\d+)?)\s*gram/i);
+    if (m || /crypto tip/i.test(e.tag)) {
+      tipCount++;
+      if (m) totalGram += Number(m[1]);
+    } else {
+      noteCount++;
+    }
+  }
+
+  const fallback =
+    `Notion summary:\nTips: ${tipCount} (${totalGram.toFixed(2)} GRAM)\nNotes: ${noteCount}`;
+
+  if (!process.env.GROQ_API_KEY) return fallback;
+
+  const t0 = Date.now();
+  const listText = entries
+    .map((e, i) => `${i + 1}. [${e.tag || "Entry"} | ${e.date}] ${e.title}`)
+    .join("\n");
+
+  const prompt =
+    "You are Jiko on Even G2 smart glasses. Answer the user's question using ONLY the Notion workspace entries and exact pre-calculated stats below.\n" +
+    "Format rules: max 4 short lines (under 140 characters total), plain text only, no markdown, no emojis, no invented facts.\n\n" +
+    `Exact stats: ${tipCount} tips totaling ${totalGram.toFixed(2)} GRAM; ${noteCount} notes.\n` +
+    `Entries (newest first):\n${listText}`;
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + process.env.GROQ_API_KEY,
+      },
+      body: JSON.stringify({
+        model: GROQ_LLM_MODEL,
+        temperature: 0.2,
+        max_tokens: 1024,
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: question || "Summarize my Notion notes and spending" },
+        ],
+      }),
+    });
+    if (!res.ok) throw new Error("Groq Notion AI " + res.status);
+    const json = await res.json();
+    const replyText = (json.choices?.[0]?.message?.content ?? "").trim();
+    console.log(`[TIMING] Groq Notion summary: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+    return replyText ? replyText.slice(0, 160) : fallback;
+  } catch (e) {
+    console.error("NOTION SUMMARY FALLBACK:", e.message);
+    return fallback;
+  }
 }
 
 async function fetchBalance(address) {
@@ -173,11 +246,11 @@ async function fetchHistory(address) {
   const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(address) + "&limit=6");
   if (!r.ok) throw new Error("Toncenter " + r.status);
   const json = await r.json();
-  if (!json.ok) throw new Error(json.error || "Toncenter error");
+  if (!json.ok || !Array.isArray(json.result)) throw new Error(json.error || "Toncenter error");
   console.log(`[TIMING] Toncenter history: ${((Date.now() - t0) / 1000).toFixed(2)}s`);
 
   const lines = [];
-  for (const tx of json.result ?? []) {
+  for (const tx of json.result) {
     const out = (tx.out_msgs ?? []).find((m) => Number(m.value) > 0);
     if (out) {
       const amt = (Number(out.value) / 1e9).toFixed(2);
@@ -191,6 +264,39 @@ async function fetchHistory(address) {
 
   if (!lines.length) return "No recent activity\n(testnet)";
   return "Recent activity:\n" + lines.join("\n");
+}
+
+// Feature 5: Build 3 glanceable cards for Even G2 Up/Down navigation
+async function buildCards(address) {
+  const [balRes, histRes, notionRes] = await Promise.allSettled([
+    fetchBalance(address),
+    fetchHistory(address),
+    isNotionEnabled() ? fetchRecentNotionEntries(3) : Promise.resolve("__DISABLED__"),
+  ]);
+
+  const bal = balRes.status === "fulfilled" ? balRes.value : null;
+  const card1 =
+    "Jiko · 1/3 Wallet\n" +
+    "Balance: " + (bal ?? "--") + " GRAM\n" +
+    short(address) + " (testnet)";
+
+  let card2 = "Activity · 2/3\nCould not load activity";
+  if (histRes.status === "fulfilled") {
+    const body = histRes.value.replace(/^Recent activity:\n?/i, "");
+    card2 = "Activity · 2/3\n" + body;
+  }
+
+  let card3 = "Notion · 3/3\nCould not load notes";
+  if (notionRes.status === "fulfilled") {
+    if (notionRes.value === "__DISABLED__") {
+      card3 = "Notion · 3/3\nNot connected";
+    } else {
+      const body = notionRes.value.replace(/^Notion log:\n?/i, "");
+      card3 = "Notion · 3/3\n" + body;
+    }
+  }
+
+  return { balance: bal, cards: [card1, card2, card3] };
 }
 
 async function readBody(req, limit) {
@@ -234,7 +340,7 @@ async function checkWatches(bot) {
       );
       continue;
     }
-try {
+    try {
       const r = await fetch(TONCENTER_TX + "?address=" + encodeURIComponent(w.senderAddr) + "&limit=10");
       if (!r.ok) continue;
       const json = await r.json();
@@ -252,7 +358,6 @@ try {
       if (!found) continue;
       w.status = "sent";
 
-      // Auto-log confirmed tip to Notion workspace
       let notionSuffix = "";
       if (isNotionEnabled()) {
         try {
@@ -385,6 +490,13 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           return reply(res, 401, { ok: false, error: "Not paired" });
         }
 
+        if (req.url === "/cards") {
+          const me = load()[senderId];
+          if (!me?.address) return reply(res, 401, { ok: false, error: "Wallet unlinked" });
+          const data = await buildCards(me.address);
+          return reply(res, 200, { ok: true, ...data });
+        }
+
         if (req.url === "/voice") {
           const pcm = await readBody(req, 3_000_000);
           return reply(res, 200, { text: await transcribe(pcm) });
@@ -400,7 +512,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Save voice note directly to Notion (100% hands-free)
+          // Save voice note directly to Notion
           if (cmd.type === "note") {
             if (!isNotionEnabled()) {
               return reply(res, 200, {
@@ -419,6 +531,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, {
                 ok: true,
                 type: "answer",
+                refreshCards: true,
                 message: "Saved to Notion:\n" + preview,
               });
             } catch (e) {
@@ -430,7 +543,31 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Read recent Notion notes / expense log (100% hands-free)
+          // Smart AI summary / spending analysis of Notion log
+          if (cmd.type === "notion_summary") {
+            if (!isNotionEnabled()) {
+              return reply(res, 200, {
+                ok: false,
+                message: "Notion not configured.\nSet NOTION_API_KEY &\nNOTION_DATABASE_ID",
+              });
+            }
+            try {
+              const msg = await summarizeNotion(cmd.question);
+              return reply(res, 200, {
+                ok: true,
+                type: "answer",
+                message: msg,
+              });
+            } catch (e) {
+              console.error("NOTION SUMMARY ERROR:", e.message);
+              return reply(res, 200, {
+                ok: false,
+                message: "Could not analyze Notion.\nTry again.",
+              });
+            }
+          }
+
+          // Read recent Notion notes
           if (cmd.type === "notes") {
             if (!isNotionEnabled()) {
               return reply(res, 200, {
@@ -454,7 +591,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // General AI Assistant answer on G2 display
+          // General AI Assistant answer
           if (cmd.type === "answer") {
             return reply(res, 200, {
               ok: true,
@@ -463,7 +600,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Balance check (100% hands-free)
+          // Balance check
           if (cmd.type === "balance") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -478,6 +615,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
                 ok: true,
                 type: "balance",
                 balance: bal,
+                refreshCards: true,
                 message: "Balance: " + bal + " GRAM\nWallet: " + short(me.address) + "\n(testnet)",
               });
             } catch (e) {
@@ -489,7 +627,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Recent transactions (100% hands-free)
+          // Recent transactions
           if (cmd.type === "history") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -503,6 +641,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               return reply(res, 200, {
                 ok: true,
                 type: "history",
+                refreshCards: true,
                 message: msg,
               });
             } catch (e) {
@@ -514,7 +653,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Payment request: "ask Alex for 2 gram"
+          // Payment request
           if (cmd.type === "ask") {
             if (cmd.amount > 10) return reply(res, 200, { ok: false, message: "Max 10 GRAM (testnet)" });
             const payer = findRecipient(cmd.name);
