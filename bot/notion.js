@@ -1,6 +1,7 @@
 const NOTION_API = "https://api.notion.com/v1";
 const NOTION_VERSION = "2022-06-28";
 const SCHEMA_TTL_MS = 60_000;
+const GROQ_LLM_MODEL = process.env.GROQ_LLM_MODEL || "openai/gpt-oss-20b";
 
 let cachedSchema = null;
 
@@ -210,12 +211,37 @@ export async function fetchOpenTasks(limit = 30) {
   return entries.filter((e) => /task/i.test(e.tag) && !e.done);
 }
 
+const STOP_WORDS =
+  /^(the|my|a|an|to|as|is|in|on|for|of|with|that|this|task|tasks|todo|item|done|complete|completed|finished|mark)$/;
+
 const tokenize = (s) =>
   String(s || "")
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length >= 2 && !/^(the|my|a|an|to|as|is|in|on|for|task|item|done|complete|finished)$/.test(w));
+    .filter((w) => w.length >= 2 && !STOP_WORDS.test(w));
+
+function stemWord(w) {
+  let s = String(w || "").toLowerCase();
+  const suffixes = ["ment", "ness", "ion", "ing", "ied", "ed", "es", "er", "or", "al", "s", "e"];
+  for (const suf of suffixes) {
+    if (s.length - suf.length >= 3 && s.endsWith(suf)) {
+      s = s.slice(0, -suf.length);
+      break;
+    }
+  }
+  return s;
+}
+
+function wordsMatch(a, b) {
+  if (a === b) return true;
+  const sa = stemWord(a);
+  const sb = stemWord(b);
+  if (sa === sb) return true;
+  const minLen = Math.min(sa.length, sb.length);
+  if (minLen >= 4 && (sa.includes(sb) || sb.includes(sa))) return true;
+  return false;
+}
 
 function scoreMatch(title, query) {
   const t = String(title || "").toLowerCase();
@@ -228,9 +254,57 @@ function scoreMatch(title, query) {
   const tWords = tokenize(t);
   let hits = 0;
   for (const qw of qWords) {
-    if (tWords.some((tw) => tw === qw || tw.includes(qw) || qw.includes(tw))) hits++;
+    if (tWords.some((tw) => wordsMatch(tw, qw))) hits++;
   }
   return hits > 0 ? Math.round((hits / qWords.length) * 60) + hits * 5 : 0;
+}
+
+async function matchTaskWithAi(query, candidates) {
+  if (!process.env.GROQ_API_KEY || !candidates.length) return null;
+  const t0 = Date.now();
+  const list = candidates
+    .slice(0, 15)
+    .map((c, i) => `${i + 1}. ${c.title}`)
+    .join("\n");
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + process.env.GROQ_API_KEY,
+      },
+      body: JSON.stringify({
+        model: GROQ_LLM_MODEL,
+        temperature: 0,
+        max_tokens: 1024,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              'You match a user\'s spoken task reference to an open Notion task. Return ONLY raw JSON: {"index": <1-based number of the matching task, or 0 if none clearly match>}. Match word forms (e.g. "migration" -> "Migrate ..."), synonyms, and paraphrases, but return 0 if unrelated.',
+          },
+          {
+            role: "user",
+            content: `User said: "${query}"\nOpen tasks:\n${list}`,
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const parsed = JSON.parse((json.choices?.[0]?.message?.content ?? "").trim());
+    const idx = Number(parsed.index);
+    console.log(`[TIMING] Notion AI task match (idx=${idx}): ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+    if (Number.isInteger(idx) && idx >= 1 && idx <= Math.min(15, candidates.length)) {
+      return candidates[idx - 1];
+    }
+  } catch (e) {
+    console.error("NOTION AI TASK MATCH FALLBACK:", e.message);
+  }
+  return null;
 }
 
 export async function completeNotionTask(query) {
@@ -261,7 +335,10 @@ export async function completeNotionTask(query) {
       }
       return bestScore >= 20 ? best : null;
     };
-    target = pickBest(openTasks) || pickBest(openOthers);
+    target =
+      pickBest(openTasks) ||
+      (await matchTaskWithAi(cleanQuery, openTasks)) ||
+      pickBest(openOthers);
   }
 
   if (!target) {
