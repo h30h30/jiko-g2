@@ -159,7 +159,7 @@ async function transcribe(pcm) {
   const wav = wavFromPcm(pcm);
   const optInNames = getOptInVoiceNames();
   const sttPrompt =
-    "Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, replies, tasks, mark as done, catch me up, balance, and Notion notes." +
+    "Jiko on Even G2 glasses. Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, replies, new task, add task, mark as done, catch me up, balance, and Notion notes." +
     (optInNames.length ? " Opt-in voice names: " + optInNames.join(", ") + "." : "");
 
   const form = new FormData();
@@ -223,7 +223,7 @@ async function understandVoice(transcript) {
     '2) Buying someone coffee(s): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
     '3) Requesting money from someone in TON/GRAM or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
     '4) Sending a short Telegram message or replying to someone: {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
-    '5) Adding an actionable task/todo to Notion (e.g. "add task: record demo video", "todo send deck tomorrow"): {"type":"task","content":"<clean task text>","due":"<YYYY-MM-DD if date mentioned, else empty string>"}\n' +
+    '5) Adding an actionable task/todo to Notion — ONLY when the user explicitly says "new task", "add task", "create task", or "todo" (never turn general statements or rename requests into a task): {"type":"task","content":"<clean task text>","due":"<YYYY-MM-DD if date mentioned, else empty string>"}\n' +
     '6) Listing open/pending Notion tasks (e.g. "what are my open tasks?", "show my todos"): {"type":"tasks"}\n' +
     '7) Marking a Notion task as done/complete (e.g. "mark demo video as done", "complete pitch deck"): {"type":"complete_task","query":"<task keywords>"}\n' +
     '8) Quick workspace + wallet briefing (e.g. "catch me up", "brief me", "give me my daily brief"): {"type":"brief"}\n' +
