@@ -11,6 +11,10 @@ const API =
   'https://jiko-ob5s.onrender.com'
 const TOKEN_KEY = 'jiko_token'
 const MAX_LISTEN_MS = 15_000
+const MIN_LISTEN_GUARD_MS = 1200
+
+const FOREGROUND_ENTER = 4 as OsEventTypeList
+const FOREGROUND_EXIT = 5 as OsEventTypeList
 
 const bridge = await waitForEvenAppBridge()
 
@@ -107,6 +111,7 @@ type State = 'idle' | 'listening' | 'busy' | 'confirming' | 'waiting'
 let state: State = 'idle'
 let parts: Uint8Array[] = []
 let pendingId = ''
+let listenStartedAt = 0
 let cancelTimer: ReturnType<typeof setTimeout> | undefined
 let listenTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -122,11 +127,12 @@ function clearTimers() {
 }
 
 const homeHeader = () => (liveBalance ? 'Jiko · ' + liveBalance + ' GRAM' : 'Jiko')
+const FOOTER = '\n\nTap: talk · Up/Down · 2x: sync'
 
 async function renderCurrentCard() {
   showingCard = true
   const body = cards[cardIndex] || homeHeader()
-  await show(body + '\n\nUp/Down: cards · Tap: talk')
+  await show(body + FOOTER)
 }
 
 async function refreshCards(renderIfShowing = false) {
@@ -135,6 +141,7 @@ async function refreshCards(renderIfShowing = false) {
     const res = await postJson('/cards', {})
     if (res.ok && Array.isArray(res.cards) && res.cards.length) {
       cards = res.cards
+      if (cardIndex >= cards.length) cardIndex = 0
       if (res.balance) liveBalance = String(res.balance)
       lastCardsFetch = Date.now()
       if (renderIfShowing && state === 'idle' && showingCard) {
@@ -151,8 +158,9 @@ const idle = async (text: string) => {
   state = 'idle'
   pendingId = ''
   showingCard = false
+  listenStartedAt = 0
   clearTimers()
-  await show(text + '\n\nTap: talk · Up/Down: cards')
+  await show(text + FOOTER)
 }
 
 async function handleExpiredSession() {
@@ -162,6 +170,7 @@ async function handleExpiredSession() {
   cardIndex = 0
   lastCardsFetch = 0
   showingCard = false
+  listenStartedAt = 0
   state = 'idle'
   pendingId = ''
   clearTimers()
@@ -243,6 +252,7 @@ unpairBtn?.addEventListener('click', async () => {
   cardIndex = 0
   lastCardsFetch = 0
   showingCard = false
+  listenStartedAt = 0
   state = 'idle'
   pendingId = ''
   clearTimers()
@@ -260,6 +270,25 @@ bridge.onEvenHubEvent(async event => {
 
   const sysType = eventTypeOf(event.sysEvent)
   const textType = eventTypeOf(event.textEvent)
+
+  // Handle OS Menu / background transitions cleanly
+  if (sysType === FOREGROUND_EXIT || textType === FOREGROUND_EXIT) {
+    if (state === 'listening') {
+      clearTimers()
+      await bridge.audioControl(false)
+      parts = []
+      state = 'idle'
+      listenStartedAt = 0
+    }
+    return
+  }
+
+  if (sysType === FOREGROUND_ENTER || textType === FOREGROUND_ENTER) {
+    if (state === 'idle' && token && cards.length) {
+      await renderCurrentCard()
+    }
+    return
+  }
 
   // Up / Down card navigation on Even G2 when idle
   const isUp =
@@ -287,12 +316,19 @@ bridge.onEvenHubEvent(async event => {
     return
   }
 
+  // Double Click: live sync when idle (no black screen), or Cancel when active
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     if (state === 'busy') return
     clearTimers()
     if (state === 'idle') {
-      await bridge.audioControl(false)
-      bridge.shutDownPageContainer(1)
+      if (!token) {
+        await show('Jiko\nPair in phone app\nSend /pair to bot')
+        return
+      }
+      await show('Syncing live data...')
+      lastCardsFetch = 0
+      await refreshCards(false)
+      await renderCurrentCard()
       return
     }
     await bridge.audioControl(false)
@@ -319,8 +355,9 @@ bridge.onEvenHubEvent(async event => {
     state = 'listening'
     showingCard = false
     parts = []
+    listenStartedAt = Date.now()
     await bridge.audioControl(true)
-    await show('Listening...\nTap to stop (max 15s)')
+    await show('Listening...\nTap to stop · 2x: cancel')
     listenTimer = setTimeout(() => {
       if (state === 'listening') {
         void (async () => {
@@ -334,11 +371,17 @@ bridge.onEvenHubEvent(async event => {
   }
 
   if (state === 'listening') {
+    const total = parts.reduce((n, p) => n + p.length, 0)
+    // Ignore premature release bounce (e.g. simulator Long Press 800ms hold)
+    if (Date.now() - listenStartedAt < MIN_LISTEN_GUARD_MS && total < 3200) {
+      return
+    }
+
     clearTimers()
     state = 'busy'
+    listenStartedAt = 0
     await bridge.audioControl(false)
 
-    const total = parts.reduce((n, p) => n + p.length, 0)
     if (total < 3200) {
       return await idle('Too short.\nTap, speak, then tap again.')
     }
