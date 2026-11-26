@@ -280,3 +280,128 @@ bot.command("tip", async (ctx) => {
       bot.api
         .editMessageText(msg.chat.id, msg.message_id, "⌛ Tip request expired. Send /tip again.")
         .catch(() => {});
+    }, 300_000);
+  }
+});
+
+bot.callbackQuery(/^wait:(.+)$/, async (ctx) => {
+  const draft = consumeInviteDraft(ctx.match[1]);
+  await ctx.answerCallbackQuery();
+  if (!draft) {
+    return ctx.editMessageText("⌛ Invite prompt expired. Send /tip again.");
+  }
+  addPendingInvite(draft.senderId, draft.targetUsername, draft.amount);
+  return ctx.editMessageText(
+    "⏳ Saved! When @" + draft.targetUsername + " links their wallet within 24h, " +
+      "I'll send you the signing button for " + draft.amount + " GRAM.\n\n" +
+      "Share this link with them:\nhttps://t.me/" + getBotUsername()
+  );
+});
+
+bot.on("message:web_app_data", async (ctx) => {
+  try {
+    const data = JSON.parse(ctx.message.web_app_data.data);
+    const db = load();
+    const existed = Boolean(db[ctx.from.id]);
+
+    if (String(data.chain) !== "-3") {
+      return ctx.reply(
+        "⚠️ Please connect a TON Testnet wallet (not Mainnet).\n" +
+          "Switch your wallet to Testnet and tap the button below again.",
+        { reply_markup: walletKeyboard(existed) }
+      );
+    }
+
+    const alias = db[ctx.from.id]?.alias;
+    const coffeeUsd = db[ctx.from.id]?.coffeeUsd;
+    const savedUser = {
+      username: ctx.from.username ?? null,
+      first_name: ctx.from.first_name ?? null,
+      alias,
+      coffeeUsd,
+      address: data.address,
+      chain: data.chain,
+    };
+    db[ctx.from.id] = savedUser;
+    save(db);
+
+    const voiceHint = !alias
+      ? "\n\n🎙 Tip: Set a short voice name with /voicename YourName so friends can buy you a coffee on G2."
+      : "";
+
+    await ctx.reply(
+      (existed ? "Wallet updated ✅\n" : "Wallet linked ✅\n") +
+        data.address +
+        voiceHint +
+        "\n\nSend /pair to connect your G2 glasses.",
+      { reply_markup: walletKeyboard(true) }
+    );
+
+    const uname = (savedUser.username ?? "").toLowerCase();
+    const matchedInvites = popPendingInvitesFor(uname);
+    for (const inv of matchedInvites) {
+      const target = { ...savedUser, id: String(ctx.from.id) };
+      const watchId = crypto.randomBytes(8).toString("hex");
+      const sent = await bot.api
+        .sendMessage(
+          inv.senderId,
+          "🎉 @" + uname + " just linked their wallet!\n" +
+            "Ready to send your " + inv.amount + " GRAM tip? (Valid for 5 minutes)",
+          {
+            reply_markup: new InlineKeyboard().webApp(
+              "Review & sign",
+              payLink(target, inv.amount, watchId)
+            ),
+          }
+        )
+        .catch(() => null);
+
+      const sender = db[inv.senderId];
+      if (sent && sender?.address) {
+        watchPayment(
+          {
+            senderAddr: sender.address,
+            senderId: inv.senderId,
+            senderLabel: sender.username ? "@" + sender.username : sender.first_name || "someone",
+            recipientId: target.id,
+            recipientAddr: target.address,
+            nano: String(Math.round(inv.amount * 1e9)),
+            amount: inv.amount,
+            label: "@" + uname,
+            messageId: sent.message_id,
+          },
+          watchId
+        );
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    await ctx.reply("Could not save the wallet.");
+  }
+});
+
+startApi(bot);
+
+bot.start({
+  onStart: async (info) => {
+    setBotUsername(info.username);
+    console.log("started as @" + info.username);
+    await bot.api.setMyCommands([
+      { command: "start", description: "Link or change your wallet" },
+      { command: "pair", description: "Connect your Even G2 glasses" },
+      { command: "price", description: "Live TON/USD & coffee rate" },
+      { command: "coffee", description: "Set your coffee price in USD" },
+      { command: "tip", description: "Send a tip: /tip @username 1" },
+      { command: "ask", description: "Request GRAM: /ask @username 2" },
+      { command: "note", description: "Save a note to Notion" },
+      { command: "help", description: "Instructions" },
+      { command: "wallet", description: "Show your linked wallet" },
+      { command: "voicename", description: "Set the name used by voice" },
+      { command: "unlink", description: "Remove your wallet" },
+    ]);
+    await bot.api.setMyShortDescription("AI voice assistant, Notion notes & TON tips on Even G2 glasses.");
+    await bot.api.setMyDescription(
+      "Jiko is your AI voice assistant, Notion workspace logger, and non-custodial TON tip wallet on Even G2 glasses. Tap Start to link your wallet."
+    );
+  },
+});
