@@ -1,5 +1,8 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import pg from "pg";
+
+const { Pool } = pg;
 
 export const PAGE = "https://h30h30.github.io/jiko-g2";
 const FILE = "registry.json";
@@ -10,6 +13,122 @@ export const getBotUsername = () => botUsername;
 export const setBotUsername = (name) => {
   if (name) botUsername = name;
 };
+
+// Persistent storage layer: Postgres (Neon/Render) with write-through cache & JSON fallback
+let pool = null;
+let dbReady = false;
+let registryCache = {};
+let sessionsCache = {};
+let writeChain = Promise.resolve();
+
+export const isDbEnabled = () => dbReady;
+
+function loadJsonFile(path) {
+  try {
+    return fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, "utf8")) : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function initStorage() {
+  const dbUrl = (process.env.DATABASE_URL || "").trim();
+  if (!dbUrl) {
+    registryCache = loadJsonFile(FILE);
+    sessionsCache = loadJsonFile(SESSIONS_FILE);
+    console.log("[STORAGE] Local JSON mode (set DATABASE_URL for Postgres)");
+    return;
+  }
+
+  pool = new Pool({
+    connectionString: dbUrl,
+    ssl: { rejectUnauthorized: false },
+    max: 3,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+  });
+
+  // Prevent unhandled error crashes when Neon suspends idle connections
+  pool.on("error", (err) => {
+    console.error("[STORAGE] Postgres idle pool error:", err.message);
+  });
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await pool.query(
+        "CREATE TABLE IF NOT EXISTS jiko_kv (k TEXT PRIMARY KEY, v JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"
+      );
+      const { rows } = await pool.query(
+        "SELECT k, v FROM jiko_kv WHERE k IN ('registry', 'sessions')"
+      );
+      for (const row of rows) {
+        if (row.k === "registry" && row.v && typeof row.v === "object") registryCache = row.v;
+        if (row.k === "sessions" && row.v && typeof row.v === "object") sessionsCache = row.v;
+      }
+      dbReady = true;
+      console.log(
+        `[STORAGE] Postgres ready (${Object.keys(registryCache).length} users, ${Object.keys(sessionsCache).length} sessions)`
+      );
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.error(`[STORAGE] Postgres init attempt ${attempt}/3 failed:`, e.message);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  console.error("[STORAGE] Falling back to local JSON after Postgres error:", lastErr?.message);
+  pool = null;
+  dbReady = false;
+  registryCache = loadJsonFile(FILE);
+  sessionsCache = loadJsonFile(SESSIONS_FILE);
+}
+
+function persistKey(key, data, fallbackFile) {
+  if (pool && dbReady) {
+    const payload = JSON.stringify(data);
+    writeChain = writeChain
+      .then(() =>
+        pool.query(
+          "INSERT INTO jiko_kv (k, v, updated_at) VALUES ($1, $2::jsonb, NOW()) " +
+            "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()",
+          [key, payload]
+        )
+      )
+      .catch((e) => console.error(`[STORAGE] Failed to persist ${key}:`, e.message));
+    return;
+  }
+  try {
+    fs.writeFileSync(fallbackFile, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error(`[STORAGE] File write error (${fallbackFile}):`, e.message);
+  }
+}
+
+export const load = () => registryCache;
+export const save = (d) => {
+  registryCache = d;
+  persistKey("registry", d, FILE);
+};
+
+export const loadSessions = () => sessionsCache;
+export const saveSessions = (d) => {
+  sessionsCache = d;
+  persistKey("sessions", d, SESSIONS_FILE);
+};
+
+export function isNotionAllowed(userId, userRecord) {
+  const raw = (process.env.NOTION_ALLOWED_USERS || "").trim();
+  if (!raw) return true;
+  const allowList = raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase().replace(/^@/, ""))
+    .filter(Boolean);
+  const uid = String(userId ?? "");
+  const uname = (userRecord?.username || "").toLowerCase();
+  return allowList.includes(uid) || (Boolean(uname) && allowList.includes(uname));
+}
 
 const inviteDrafts = new Map();
 const pendingInvites = [];
@@ -73,13 +192,6 @@ export function inviteShareUrl(coffeeCount = 0) {
     encodeURIComponent(text)
   );
 }
-
-export const load = () => (fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, "utf8")) : {});
-export const save = (d) => fs.writeFileSync(FILE, JSON.stringify(d, null, 2));
-
-export const loadSessions = () =>
-  fs.existsSync(SESSIONS_FILE) ? JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8")) : {};
-export const saveSessions = (d) => fs.writeFileSync(SESSIONS_FILE, JSON.stringify(d, null, 2));
 
 export function revokeUserSessions(userId) {
   const sessions = loadSessions();
@@ -165,7 +277,7 @@ export function parseCommand(text) {
     return { type: "notes" };
   }
 
-  // 4) Live TON/USD price
+  // 4) Live TON/USD reference rate
   if (
     /\b(ton|toncoin)\b.*\b(price|rate|worth|usd|dollars?)\b/.test(t) ||
     /\b(price|rate)\b.*\b(ton|toncoin)\b/.test(t)
@@ -260,7 +372,7 @@ const norm = (s) =>
     .replace(/[0-9]/g, (d) => LEET[d] ?? "")
     .replace(/[^a-z]/g, "");
 
-// General phonetic normalization for spoken names
+// General phonetic normalization for spoken names (runs locally on server)
 function phonetic(s) {
   return norm(s)
     .replace(/ph/g, "f")

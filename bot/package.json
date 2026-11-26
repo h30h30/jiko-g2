@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "grammy": "^1.48.0"
+    "grammy": "^1.48.0",
+    "pg": "^8.23.1"
   }
 }

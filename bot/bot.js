@@ -3,6 +3,8 @@ import { Bot, Keyboard, InlineKeyboard } from "grammy";
 import { startApi, watchPayment, createPairCode, fetchTonPriceUsd, getUserCoffeeUsd } from "./api.js";
 import {
   PAGE,
+  initStorage,
+  isNotionAllowed,
   load,
   save,
   revokeUserSessions,
@@ -24,28 +26,28 @@ const walletKeyboard = (linked) =>
 
 const HELP =
   "How Jiko works 🐦\n\n" +
-  "1) Link your wallet: /start, then tap the wallet button (testnet wallet via TON Connect).\n" +
+  "1) Link your wallet: /start, then tap the wallet button (TON Testnet via TON Connect).\n" +
   "2) Pair your G2 glasses: send /pair and enter the 6-digit code in the Jiko companion app.\n" +
   "3) Speak naturally to your G2 glasses:\n" +
-  "   • \"buy Alex a coffee\" (live TON/USD conversion)\n" +
+  "   • \"buy Alex a coffee\" (converted via live TON/USD mainnet ref rate)\n" +
   "   • \"send $5 to Alex\" or \"send 1 TON to Alex\"\n" +
   "   • \"ask Alex for $3\" or \"what is TON price?\"\n" +
-  "   • \"note: send pitch deck tomorrow\" (saves to Notion)\n" +
+  "   • \"note: send pitch deck tomorrow\" (saves to demo Notion log)\n" +
   "   • \"summarize my Notion notes\" or \"how much did I spend?\"\n" +
-  "   • Use Up/Down on G2 to flip between Welcome, Wallet, Notion & Instructions\n\n" +
+  "   • Up/Down: flip 4 HUD cards · Double-tap: sync / cancel\n\n" +
   "Commands:\n" +
   "/start - link or change your wallet\n" +
   "/pair - get a code to connect your G2 glasses\n" +
-  "/price - check live TON/USD & coffee rate\n" +
-  "/coffee amount - set your coffee price in USD (default $5)\n" +
-  "/tip @user amount - send a tip (max 25 GRAM)\n" +
-  "/ask @user amount - request GRAM from a friend\n" +
-  "/note text - save a quick note to Notion\n" +
+  "/price - live TON/USD mainnet ref & coffee rate\n" +
+  "/coffee amount - set your coffee reference price in USD (default $5)\n" +
+  "/tip @user amount - send a testnet tip (max 25 GRAM)\n" +
+  "/ask @user amount - request testnet GRAM from a friend\n" +
+  "/note text - save a quick note to the demo Notion log\n" +
   "/wallet - show your linked wallet\n" +
-  "/voicename Name - set an easy name friends say to G2\n" +
-  "/unlink - remove your wallet from Jiko\n" +
+  "/voicename Name - opt-in voice alias for speech recognition (/voicename clear to remove)\n" +
+  "/unlink - remove your wallet and unpair glasses\n" +
   "/help - this message\n\n" +
-  "Testnet only: no real money. Each signing request is valid for 5 minutes.";
+  "Testnet only (no real value). Non-custodial: every transfer requires your wallet signature within 5 minutes.";
 
 bot.catch((err) => console.error("BOT ERROR:", err));
 
@@ -57,14 +59,14 @@ bot.command("start", async (ctx) => {
     me.first_name = ctx.from.first_name ?? null;
     save(db);
     return ctx.reply(
-      "Welcome back! 🐦\nYour wallet: " + short(me.address) +
-        "\nSend /pair to connect your G2 glasses, /price for live TON/USD, /coffee to set coffee price, or /help.",
+      "Welcome back! 🐦\nYour wallet: " + short(me.address) + " (testnet)\n" +
+        "Send /pair to connect your G2 glasses, /price for TON/USD ref rate, /coffee to set coffee price, or /help.",
       { reply_markup: walletKeyboard(true) }
     );
   }
   return ctx.reply(
     "Hi, I'm Jiko 🐦\n" +
-      "Your AI voice assistant, Notion workspace logger & non-custodial TON tip wallet on Even G2 glasses.\n\n" +
+      "Your AI voice assistant, Notion workspace logger & non-custodial TON testnet tip wallet on Even G2 glasses.\n\n" +
       "Tap the button below to link your testnet wallet. For instructions, see /help.",
     { reply_markup: walletKeyboard(false) }
   );
@@ -78,18 +80,19 @@ bot.command("price", async (ctx) => {
     const coffeeUsd = getUserCoffeeUsd(ctx.from.id);
     const coffeeGram = Math.max(0.01, Number((coffeeUsd / price).toFixed(2)));
     return ctx.reply(
-      `📈 Live TON/USD: $${price.toFixed(2)}\n` +
-        `☕ 1 Coffee ($${coffeeUsd}) ≈ ${coffeeGram} GRAM`
+      `📈 Live TON/USD (mainnet ref): $${price.toFixed(2)}\n` +
+        `☕ 1 Coffee ($${coffeeUsd} ref) ≈ ${coffeeGram} GRAM\n` +
+        "ℹ️ Testnet tokens have no real monetary value."
     );
   } catch {
-    return ctx.reply("Could not fetch live TON/USD price right now. Try again in a moment.");
+    return ctx.reply("Could not fetch live TON/USD reference rate right now. Try again in a moment.");
   }
 });
 
 bot.command("wallet", (ctx) => {
   const me = load()[ctx.from.id];
   if (!me) return ctx.reply("No wallet linked yet. Use /start.");
-  return ctx.reply("Your linked wallet (testnet):\n" + me.address);
+  return ctx.reply("Your linked wallet (TON Testnet · no real value):\n" + me.address);
 });
 
 bot.command("pair", (ctx) => {
@@ -119,17 +122,26 @@ bot.command("voicename", async (ctx) => {
   if (!me) return ctx.reply("Link your wallet first with /start.");
   if (!name) {
     return ctx.reply(
-      "Your voice name: " + (me.alias ?? "not set") +
-        "\nPick something easy to say, e.g. /voicename Alex\n" +
-        "Then anyone can tell the glasses: buy Alex a coffee."
+      "Your opt-in voice name: " + (me.alias ?? "not set") + "\n\n" +
+        "Privacy note: Only opt-in voice names set here are shared with speech recognition (Groq) to improve spoken name accuracy. Telegram usernames are never sent.\n\n" +
+        "Set: /voicename Alex\n" +
+        "Remove: /voicename clear"
     );
   }
+  if (/^(clear|off|none|remove)$/i.test(name)) {
+    delete me.alias;
+    save(db);
+    return ctx.reply("Voice name removed ✅ Your name will not be sent to speech recognition.");
+  }
   if (name.length > 24 || !/[a-z]/i.test(name)) {
-    return ctx.reply("Use a short name with English letters.");
+    return ctx.reply("Use a short name with English letters (or /voicename clear to remove).");
   }
   me.alias = name;
   save(db);
-  return ctx.reply("Voice name set: " + name + " ✅");
+  return ctx.reply(
+    "Voice name set: " + name + " ✅\n" +
+      "This alias will be used to improve voice recognition. Use /voicename clear anytime to opt out."
+  );
 });
 
 bot.command("coffee", async (ctx) => {
@@ -140,7 +152,7 @@ bot.command("coffee", async (ctx) => {
   if (!raw) {
     const current = getUserCoffeeUsd(ctx.from.id);
     return ctx.reply(
-      `☕ Your coffee price: $${current}\n` +
+      `☕ Your coffee reference price: $${current} (converted via live TON/USD mainnet ref rate)\n` +
         "Change it anytime, e.g. /coffee 3.5"
     );
   }
@@ -150,7 +162,7 @@ bot.command("coffee", async (ctx) => {
   }
   me.coffeeUsd = Number(price.toFixed(2));
   save(db);
-  return ctx.reply(`☕ Coffee price set to $${me.coffeeUsd} ✅`);
+  return ctx.reply(`☕ Coffee reference price set to $${me.coffeeUsd} ✅`);
 });
 
 bot.command("note", async (ctx) => {
@@ -159,6 +171,10 @@ bot.command("note", async (ctx) => {
   if (!isNotionEnabled()) {
     return ctx.reply("Notion is not configured on the server yet.");
   }
+  const me = load()[ctx.from.id];
+  if (!isNotionAllowed(ctx.from.id, me)) {
+    return ctx.reply("The shared demo Notion workspace is currently restricted to demo accounts.");
+  }
   try {
     const author = ctx.from.username ? "@" + ctx.from.username : ctx.from.first_name || "user";
     await saveNotionEntry({
@@ -166,7 +182,7 @@ bot.command("note", async (ctx) => {
       title: text,
       details: `Saved from Telegram by ${author}`,
     });
-    return ctx.reply("📒 Saved to Notion ✅\n" + text);
+    return ctx.reply("📒 Saved to demo Notion log ✅\n" + text);
   } catch (e) {
     console.error("TELEGRAM NOTE ERROR:", e.message);
     return ctx.reply("Could not save to Notion. Check your database connection.");
@@ -197,7 +213,7 @@ bot.command("ask", async (ctx) => {
   const sent = await bot.api
     .sendMessage(
       payer.id,
-      "💸 " + requesterLabel + " requested " + amount + " GRAM from you (testnet).\nValid for 5 minutes.",
+      "💸 " + requesterLabel + " requested " + amount + " GRAM from you (testnet · no real value).\nValid for 5 minutes.",
       {
         reply_markup: new InlineKeyboard().webApp(
           "Review & sign",
@@ -225,7 +241,7 @@ bot.command("ask", async (ctx) => {
       watchId
     );
   }
-  return ctx.reply("📩 Sent payment request (" + amount + " GRAM) to @" + username + ".");
+  return ctx.reply("📩 Sent payment request (" + amount + " GRAM, testnet) to @" + username + ".");
 });
 
 bot.command("tip", async (ctx) => {
@@ -258,7 +274,7 @@ bot.command("tip", async (ctx) => {
   const target = { ...entry[1], id: entry[0] };
   const watchId = crypto.randomBytes(8).toString("hex");
   const msg = await ctx.reply(
-    "Tip " + amount + " GRAM to @" + username + "?\nValid for 5 minutes.",
+    "Tip " + amount + " GRAM to @" + username + " (testnet · no real value)?\nValid for 5 minutes.",
     { reply_markup: new InlineKeyboard().webApp("Review & sign", payLink(target, amount, watchId)) }
   );
   const me = db[ctx.from.id];
@@ -336,11 +352,11 @@ bot.on("message:web_app_data", async (ctx) => {
     save(db);
 
     const voiceHint = !alias
-      ? "\n\n🎙 Tip: Set a short voice name with /voicename YourName so friends can buy you a coffee on G2."
+      ? "\n\n🎙 Optional: Set an opt-in voice alias with /voicename YourName so friends can buy you a coffee on G2."
       : "";
 
     await ctx.reply(
-      (existed ? "Wallet updated ✅\n" : "Wallet linked ✅\n") +
+      (existed ? "Wallet updated ✅ (testnet)\n" : "Wallet linked ✅ (testnet)\n") +
         data.address +
         voiceHint +
         "\n\nSend /pair to connect your G2 glasses.",
@@ -356,7 +372,7 @@ bot.on("message:web_app_data", async (ctx) => {
         .sendMessage(
           inv.senderId,
           "🎉 @" + uname + " just linked their wallet!\n" +
-            "Ready to send your " + inv.amount + " GRAM tip? (Valid for 5 minutes)",
+            "Ready to send your " + inv.amount + " GRAM testnet tip? (Valid for 5 minutes)",
           {
             reply_markup: new InlineKeyboard().webApp(
               "Review & sign",
@@ -390,6 +406,8 @@ bot.on("message:web_app_data", async (ctx) => {
   }
 });
 
+// Boot storage first, then start API and Telegram bot
+await initStorage();
 startApi(bot);
 
 bot.start({
@@ -399,19 +417,19 @@ bot.start({
     await bot.api.setMyCommands([
       { command: "start", description: "Link or change your wallet" },
       { command: "pair", description: "Connect your Even G2 glasses" },
-      { command: "price", description: "Live TON/USD & coffee rate" },
-      { command: "coffee", description: "Set your coffee price in USD" },
-      { command: "tip", description: "Send a tip: /tip @username 1" },
-      { command: "ask", description: "Request GRAM: /ask @username 2" },
-      { command: "note", description: "Save a note to Notion" },
+      { command: "price", description: "Live TON/USD ref & coffee rate" },
+      { command: "coffee", description: "Set your coffee ref price in USD" },
+      { command: "tip", description: "Send a testnet tip: /tip @username 1" },
+      { command: "ask", description: "Request testnet GRAM: /ask @username 2" },
+      { command: "note", description: "Save a note to demo Notion log" },
       { command: "help", description: "Instructions" },
       { command: "wallet", description: "Show your linked wallet" },
-      { command: "voicename", description: "Set the name used by voice" },
-      { command: "unlink", description: "Remove your wallet" },
+      { command: "voicename", description: "Opt-in voice name for G2" },
+      { command: "unlink", description: "Remove wallet & unpair glasses" },
     ]);
-    await bot.api.setMyShortDescription("AI voice assistant, Notion notes & TON tips on Even G2 glasses.");
+    await bot.api.setMyShortDescription("AI voice assistant, Notion notes & TON testnet tips on Even G2 glasses.");
     await bot.api.setMyDescription(
-      "Jiko is your AI voice assistant, Notion workspace logger, and non-custodial TON tip wallet on Even G2 glasses. Tap Start to link your wallet."
+      "Jiko is your AI voice assistant, Notion workspace logger, and non-custodial TON testnet tip wallet on Even G2 glasses. Tap Start to link your wallet."
     );
   },
 });
