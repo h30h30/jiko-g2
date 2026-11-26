@@ -1,12 +1,13 @@
 # Jiko — Voice & HUD Companion for Even G2
 
-Jiko is a voice and glanceable HUD app for **Even G2** smart glasses paired with a **Telegram** bot (`@jikopay_bot`) and companion web app, connecting **Notion** tasks/notes and a **non-custodial TON Testnet** tip flow.
+Jiko is a voice and glanceable HUD app for **Even G2** smart glasses paired with a **Telegram** bot ([@jikopay_bot](https://t.me/jikopay_bot)) and companion web app, connecting **Notion** tasks/notes and a **non-custodial TON Testnet** tip flow.
 
 - **Primary Track:** Track 04 — AI Assistants & Work
 - **Secondary Track:** Track 02 — Crypto & DeFi (TON Testnet)
-- **Live Companion & Wallet Linker:** `[https://h30h30.github.io/jiko-g2](https://h30h30.github.io/jiko-g2)`
-- **Backend API & Health:** `[https://jiko-ob5s.onrender.com/health](https://jiko-ob5s.onrender.com/health)`
-- **Demo Notion Sandbox (read-only view):** `[https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec](https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec)`
+- **Live Companion & Wallet Linker:** [h30h30.github.io/jiko-g2](https://h30h30.github.io/jiko-g2)
+- **Backend API & Health:** [jiko-ob5s.onrender.com/health](https://jiko-ob5s.onrender.com/health)
+- **Demo Notion Sandbox (read-only view):** [Jiko Log on Notion](https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec)
+- **Technical Notes:** [HANDBOOK.md](./HANDBOOK.md)
 
 ---
 
@@ -67,7 +68,7 @@ Jiko is a voice and glanceable HUD app for **Even G2** smart glasses paired with
    node bot.js
    ```
 
-3. **Link & pair:** Open `@jikopay_bot` in Telegram, run `/start` to link a TON Testnet wallet, run `/pair` for a 6-digit code, and enter it in the companion app.
+3. **Link & pair:** Open [@jikopay_bot](https://t.me/jikopay_bot) in Telegram, run `/start` to link a TON Testnet wallet, run `/pair` for a 6-digit code, and enter it in the companion app.
 
 ---
 
