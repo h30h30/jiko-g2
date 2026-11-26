@@ -5,13 +5,13 @@ import {
   parseCommand,
   findRecipient,
   payLink,
+  inviteShareUrl,
   load,
   loadSessions,
   saveSessions,
   short,
   canonicalAddr,
   createInviteDraft,
-  getBotUsername,
 } from "./core.js";
 import {
   isNotionEnabled,
@@ -28,6 +28,15 @@ const MAX_TESTNET_GRAM = 25;
 export function getUserCoffeeUsd(userId) {
   const custom = Number(load()[String(userId)]?.coffeeUsd);
   return Number.isFinite(custom) && custom > 0 ? custom : COFFEE_PRICE_USD;
+}
+
+function getKnownContacts() {
+  const names = new Set();
+  for (const u of Object.values(load())) {
+    const n = (u.alias || u.first_name || u.username || "").trim();
+    if (n) names.add(n);
+  }
+  return [...names].slice(0, 20);
 }
 
 const TONCENTER_TX = "https://testnet.toncenter.com/api/v2/getTransactions";
@@ -83,7 +92,7 @@ function wavFromPcm(pcm) {
   return Buffer.concat([h, pcm]);
 }
 
-// Live TON/USD fetcher with 60s cache and 3 free public fallbacks (no API key needed)
+// Live TON/USD fetcher with 60s cache and 3 free public fallbacks
 export async function fetchTonPriceUsd(force = false) {
   if (!force && tonPriceCache && Date.now() - tonPriceCache.at < 60_000) {
     return tonPriceCache.price;
@@ -139,12 +148,17 @@ async function transcribe(pcm) {
   if (!process.env.GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY");
   const t0 = Date.now();
   const wav = wavFromPcm(pcm);
+  const contacts = getKnownContacts();
+  const sttPrompt =
+    "Voice commands for TON, GRAM, USD, coffee tips, balance, and Notion notes." +
+    (contacts.length ? " Registered contacts: " + contacts.join(", ") + "." : "");
 
   const form = new FormData();
   form.append("file", new Blob([wav], { type: "audio/wav" }), "audio.wav");
   form.append("model", GROQ_STT_MODEL);
   form.append("temperature", "0");
   form.append("language", "en");
+  form.append("prompt", sttPrompt);
   form.append("response_format", "json");
 
   const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
@@ -159,7 +173,7 @@ async function transcribe(pcm) {
   const json = await res.json();
   const text = (json.text ?? "").trim();
   console.log(
-    `[TIMING] Groq Whisper STT: ${((Date.now() - t0) / 1000).toFixed(2)}s (${(pcm.length / 32000).toFixed(1)}s audio)`
+    `[TIMING] Groq Whisper STT: ${((Date.now() - t0) / 1000).toFixed(2)}s (${(pcm.length / 32000).toFixed(1)}s audio) -> "${text}"`
   );
   return text;
 }
@@ -167,13 +181,19 @@ async function transcribe(pcm) {
 async function understandVoice(transcript) {
   if (!process.env.GROQ_API_KEY) return parseCommand(transcript);
   const t0 = Date.now();
+  const contacts = getKnownContacts();
+  const contactsHint = contacts.length
+    ? `Registered contacts: ${contacts.join(", ")}. Match phonetically close spoken names to the registered contact name.\n`
+    : "";
 
   const systemPrompt =
     "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to a TON crypto tip wallet and Notion workspace.\n" +
+    contactsHint +
+    'Treat "TON", "Toncoin", and "GRAM" identically as the same tipping token (unit: "gram").\n' +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
-    '1) Sending money/tip in GRAM/TON or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
-    '2) Buying someone coffee(s) (e.g. "buy Hessi a coffee", "get Alex 2 coffees"): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
-    '3) Requesting money from someone in GRAM/TON or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
+    '1) Sending a tip in TON/GRAM or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
+    '2) Buying someone coffee(s): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
+    '3) Requesting money from someone in TON/GRAM or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
     '4) Checking live TON/USD price: {"type":"price"}\n' +
     '5) Checking wallet balance: {"type":"balance"}\n' +
     '6) Checking recent TON transactions/activity: {"type":"history"}\n' +
@@ -253,7 +273,7 @@ async function summarizeNotion(question) {
   let noteCount = 0;
 
   for (const e of entries) {
-    const m = e.title.match(/^tip:\s*(\d+(?:\.\d+)?)\s*gram/i);
+    const m = e.title.match(/^tip:\s*(\d+(?:\.\d+)?)\s*(?:gram|ton)/i);
     if (m || /crypto tip/i.test(e.tag)) {
       tipCount++;
       if (m) totalGram += Number(m[1]);
@@ -308,7 +328,7 @@ async function summarizeNotion(question) {
   }
 }
 
-// Cached + auto-retry Toncenter balance fetcher (avoids 1 req/sec rate limit errors)
+// Cached + auto-retry Toncenter balance fetcher
 async function fetchBalance(address, force = false) {
   const cached = balanceCache.get(address);
   if (!force && cached && Date.now() - cached.at < 15_000) {
@@ -372,19 +392,20 @@ async function fetchHistory(address) {
   return "Recent activity:\n" + lines.join("\n");
 }
 
-// 3 reliable cards: 1/3 Welcome · 2/3 Wallet + TON/USD · 3/3 Notion
-async function buildCards(address) {
+// 4 clean cards: 1/4 Welcome · 2/4 Wallet · 3/4 Notion · 4/4 Instructions
+async function buildCards(address, me) {
   const [balRes, priceRes, notionRes] = await Promise.allSettled([
     fetchBalance(address),
     fetchTonPriceUsd(),
     isNotionEnabled() ? fetchRecentNotionEntries(3) : Promise.resolve("__DISABLED__"),
   ]);
 
+  const greetingName = me?.alias || me?.first_name || (me?.username ? "@" + me.username : "friend");
   const card1 =
-    "Jiko · 1/3 Home\n" +
-    "Voice AI · TON · Notion\n" +
-    'Try: "Buy Alex a coffee"\n' +
-    'or "Note: call team"';
+    "Welcome to Jiko · 1/4\n" +
+    `Hi ${greetingName}!\n` +
+    "Hands-free AI assistant\n" +
+    "for TON tips & Notion";
 
   const bal = balRes.status === "fulfilled" ? balRes.value : null;
   const tonPrice = priceRes.status === "fulfilled" ? priceRes.value : null;
@@ -396,19 +417,26 @@ async function buildCards(address) {
   const rateLine = tonPrice ? "TON: $" + tonPrice.toFixed(2) + " (live)" : short(address) + " (testnet)";
   const addrLine = tonPrice ? short(address) + " (testnet)" : "";
 
-  const card2 = ["Wallet · 2/3", balLine, rateLine, addrLine].filter(Boolean).join("\n");
+  const card2 = ["Wallet · 2/4", balLine, rateLine, addrLine].filter(Boolean).join("\n");
 
-  let card3 = "Notion · 3/3\nCould not load notes";
+  let card3 = "Notion · 3/4\nCould not load notes";
   if (notionRes.status === "fulfilled") {
     if (notionRes.value === "__DISABLED__") {
-      card3 = "Notion · 3/3\nNot connected";
+      card3 = "Notion · 3/4\nNot connected";
     } else {
       const body = notionRes.value.replace(/^Notion log:\n?/i, "");
-      card3 = "Notion · 3/3\n" + body;
+      card3 = "Notion · 3/4\n" + body;
     }
   }
 
-  return { balance: bal, cards: [card1, card2, card3] };
+  const card4 =
+    "Instructions · 4/4\n" +
+    '• "Buy Alex a coffee"\n' +
+    '• "Send 1 TON to Alex"\n' +
+    '• "Note: call team"\n' +
+    '• "How much did I spend?"';
+
+  return { balance: bal, cards: [card1, card2, card3, card4] };
 }
 
 async function readBody(req, limit) {
@@ -616,7 +644,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
         if (req.url === "/cards") {
           const me = load()[senderId];
           if (!me?.address) return reply(res, 401, { ok: false, error: "Wallet unlinked" });
-          const data = await buildCards(me.address);
+          const data = await buildCards(me.address, me);
           return reply(res, 200, { ok: true, ...data });
         }
 
@@ -631,11 +659,11 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: 'Didn\'t get that.\nTry: "Buy Alex a coffee",\n"Send $5 to Alex", or "Note: ..."',
+              message: 'Didn\'t get that.\nTry: "Buy Alex a coffee",\n"Send 1 TON to Alex", or "Note: ..."',
             });
           }
 
-          // Live TON/USD price (uses user's custom coffee price)
+          // Live TON/USD price
           if (cmd.type === "price") {
             try {
               const price = await fetchTonPriceUsd(true);
@@ -778,7 +806,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Recent transactions (voice-only)
+          // Recent transactions
           if (cmd.type === "history") {
             const me = load()[senderId];
             if (!me?.address) {
@@ -803,7 +831,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             }
           }
 
-          // Payment request (GRAM or USD)
+          // Payment request (TON/GRAM or USD)
           if (cmd.type === "ask") {
             let amountGram = cmd.amount;
             let usdDisplay = "";
@@ -843,7 +871,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
             });
           }
 
-          // Buy someone a coffee OR Tip (GRAM / USD)
+          // Buy someone a coffee OR Tip (TON/GRAM / USD)
           let amountGram = cmd.amount;
           let usdDisplay = "";
           let coffeeCount = 0;
@@ -890,6 +918,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
               senderId,
               targetName: cmd.name,
               amount: amountGram,
+              coffeeCount,
               at: Date.now(),
             });
             return reply(res, 200, {
@@ -936,23 +965,25 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
 
           if (p.kind === "invite") {
             const cleanName = p.targetName.toLowerCase().replace(/^@/, "").replace(/\s+/g, "");
-            const draftId = createInviteDraft(senderId, cleanName, p.amount);
+            const draftId = createInviteDraft(senderId, cleanName, p.amount, p.coffeeCount || 0);
+            const kb = new InlineKeyboard()
+              .url("🎁 Send invite to @" + cleanName, inviteShareUrl(p.coffeeCount || 0))
+              .row()
+              .text("🔔 Notify me when @" + cleanName + " joins (24h)", "wait:" + draftId);
+
             await bot.api.sendMessage(
               senderId,
               "@" + cleanName + " hasn't linked a wallet yet.\n" +
-                "Ask them to open https://t.me/" + getBotUsername() + " and press /start.\n\n" +
-                "No funds move yet — tap below to get notified as soon as they join.",
+                "Tap below to send them a ready-made invite message (no funds move until they join and you sign).",
               {
-                reply_markup: new InlineKeyboard().text(
-                  "🔔 Notify me when @" + cleanName + " links (24h)",
-                  "wait:" + draftId
-                ),
+                reply_markup: kb,
+                link_preview_options: { is_disabled: true },
               }
             );
             return reply(res, 200, {
               ok: true,
               type: "invite",
-              message: "Invite ready in Telegram!\nCheck Jiko bot for @" + cleanName,
+              message: "Invite ready in Telegram!\nTap to send to @" + cleanName,
             });
           }
 

@@ -8,7 +8,7 @@ import {
   revokeUserSessions,
   short,
   payLink,
-  getBotUsername,
+  inviteShareUrl,
   setBotUsername,
   createInviteDraft,
   consumeInviteDraft,
@@ -28,11 +28,11 @@ const HELP =
   "2) Pair your G2 glasses: send /pair and enter the 6-digit code in the Jiko companion app.\n" +
   "3) Speak naturally to your G2 glasses:\n" +
   "   • \"buy Alex a coffee\" (live TON/USD conversion)\n" +
-  "   • \"send $5 to Alex\" or \"send 1 gram to Alex\"\n" +
+  "   • \"send $5 to Alex\" or \"send 1 TON to Alex\"\n" +
   "   • \"ask Alex for $3\" or \"what is TON price?\"\n" +
   "   • \"note: send pitch deck tomorrow\" (saves to Notion)\n" +
   "   • \"summarize my Notion notes\" or \"how much did I spend?\"\n" +
-  "   • Use Up/Down on G2 to flip between Home, Wallet & Notion cards\n\n" +
+  "   • Use Up/Down on G2 to flip between Welcome, Wallet, Notion & Instructions\n\n" +
   "Commands:\n" +
   "/start - link or change your wallet\n" +
   "/pair - get a code to connect your G2 glasses\n" +
@@ -120,8 +120,8 @@ bot.command("voicename", async (ctx) => {
   if (!name) {
     return ctx.reply(
       "Your voice name: " + (me.alias ?? "not set") +
-        "\nPick something easy to say, e.g. /voicename Hessi\n" +
-        "Then anyone can tell the glasses: buy Hessi a coffee."
+        "\nPick something easy to say, e.g. /voicename Alex\n" +
+        "Then anyone can tell the glasses: buy Alex a coffee."
     );
   }
   if (name.length > 24 || !/[a-z]/i.test(name)) {
@@ -240,16 +240,18 @@ bot.command("tip", async (ctx) => {
     ([, u]) => (u.username ?? "").toLowerCase() === username
   );
   if (!entry) {
-    const draftId = createInviteDraft(ctx.from.id, username, amount);
+    const draftId = createInviteDraft(ctx.from.id, username, amount, 0);
+    const kb = new InlineKeyboard()
+      .url("🎁 Send invite to @" + username, inviteShareUrl(0))
+      .row()
+      .text("🔔 Notify me when @" + username + " joins (24h)", "wait:" + draftId);
+
     return ctx.reply(
       "@" + username + " hasn't linked a wallet yet.\n" +
-        "Ask them to open https://t.me/" + getBotUsername() + " and press /start.\n\n" +
-        "No funds move yet — tap below to get notified as soon as they join.",
+        "Tap below to send them a ready-made invite message (no funds move until they join and you sign).",
       {
-        reply_markup: new InlineKeyboard().text(
-          "🔔 Notify me when @" + username + " links (24h)",
-          "wait:" + draftId
-        ),
+        reply_markup: kb,
+        link_preview_options: { is_disabled: true },
       }
     );
   }
@@ -291,10 +293,18 @@ bot.callbackQuery(/^wait:(.+)$/, async (ctx) => {
     return ctx.editMessageText("⌛ Invite prompt expired. Send /tip again.");
   }
   addPendingInvite(draft.senderId, draft.targetUsername, draft.amount);
+  const kb = new InlineKeyboard().url(
+    "🎁 Send invite to @" + draft.targetUsername,
+    inviteShareUrl(draft.coffeeCount || 0)
+  );
   return ctx.editMessageText(
     "⏳ Saved! When @" + draft.targetUsername + " links their wallet within 24h, " +
       "I'll send you the signing button for " + draft.amount + " GRAM.\n\n" +
-      "Share this link with them:\nhttps://t.me/" + getBotUsername()
+      "Tap below to forward them the invite:",
+    {
+      reply_markup: kb,
+      link_preview_options: { is_disabled: true },
+    }
   );
 });
 

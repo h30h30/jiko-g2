@@ -14,12 +14,13 @@ export const setBotUsername = (name) => {
 const inviteDrafts = new Map();
 const pendingInvites = [];
 
-export function createInviteDraft(senderId, targetUsername, amount) {
+export function createInviteDraft(senderId, targetUsername, amount, coffeeCount = 0) {
   const draftId = crypto.randomBytes(4).toString("hex");
   inviteDrafts.set(draftId, {
     senderId: String(senderId),
     targetUsername: targetUsername.toLowerCase().replace(/^@/, ""),
     amount,
+    coffeeCount: Number(coffeeCount) || 0,
     exp: Date.now() + 600_000,
   });
   return draftId;
@@ -58,6 +59,19 @@ export function popPendingInvitesFor(username) {
     }
   }
   return matched;
+}
+
+export function inviteShareUrl(coffeeCount = 0) {
+  const botUrl = "https://t.me/" + getBotUsername();
+  const text = coffeeCount
+    ? `Hey! I'd like to buy you ${coffeeCount > 1 ? coffeeCount + " coffees" : "a coffee"} on Jiko ☕ Open the bot and link your TON testnet wallet so I can send it over.`
+    : "Hey! I have a small tip for you on Jiko 🎁 Open the bot and link your TON testnet wallet so I can send it over.";
+  return (
+    "https://t.me/share/url?url=" +
+    encodeURIComponent(botUrl) +
+    "&text=" +
+    encodeURIComponent(text)
+  );
 }
 
 export const load = () => (fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, "utf8")) : {});
@@ -159,7 +173,7 @@ export function parseCommand(text) {
     return { type: "price" };
   }
 
-  // 5) Buy someone a coffee: "buy Hessi a coffee" / "buy 2 coffees for Hessi"
+  // 5) Buy someone a coffee
   const coffeeA = t.match(/\b(?:buy|get|treat|send)\s+@?([a-z0-9_]+)\s+(a|an|one|two|three|four|five|\d+)\s+coffees?\b/);
   if (coffeeA) {
     const count = Math.round(extractAmount(coffeeA[2]) || 1);
@@ -171,7 +185,7 @@ export function parseCommand(text) {
     if (count > 0) return { type: "coffee", count, name: coffeeB[2] };
   }
 
-  // 6) Payment request (GRAM or USD)
+  // 6) Payment request (TON/GRAM or USD)
   const askMatch = t.match(/\b(?:ask|request)\s+@?([a-z0-9_]+)\s+(?:for|to send|to pay)\s+(.+)$/);
   if (askMatch) {
     const amount = extractAmount(askMatch[2]);
@@ -187,7 +201,7 @@ export function parseCommand(text) {
     }
   }
 
-  // 7) Tip command (GRAM or USD)
+  // 7) Tip command: "send 1 ton/gram to Alex" OR "send Alex 1 ton/gram"
   const i = t.lastIndexOf(" to ");
   if (i >= 0) {
     const left = t.slice(0, i);
@@ -199,8 +213,15 @@ export function parseCommand(text) {
       }
     }
   }
+  const directTip = t.match(/^(?:send|tip|give|pay)\s+@?([a-z0-9_]+)\s+(.+)$/);
+  if (directTip) {
+    const amount = extractAmount(directTip[2]);
+    if (amount > 0) {
+      return { type: "tip", amount, unit: isUsdText(directTip[2]) ? "usd" : "gram", name: directTip[1] };
+    }
+  }
 
-  // 8) Recent transactions (still available by voice)
+  // 8) Recent transactions
   if (
     !/\b(send|tip|give|pay|ask|request|buy)\b/.test(t) &&
     /\b(transactions?|history|recent|activity|payments?|tips?)\b/.test(t)
@@ -239,8 +260,23 @@ const norm = (s) =>
     .replace(/[0-9]/g, (d) => LEET[d] ?? "")
     .replace(/[^a-z]/g, "");
 
+// General phonetic normalization for spoken names
+function phonetic(s) {
+  return norm(s)
+    .replace(/ph/g, "f")
+    .replace(/ck/g, "k")
+    .replace(/q/g, "k")
+    .replace(/c(?=[eiy])/g, "s")
+    .replace(/c/g, "k")
+    .replace(/z/g, "s")
+    .replace(/y/g, "i")
+    .replace(/([a-z])\1+/g, "$1")
+    .replace(/[aeiou]+/g, "a");
+}
+
 export function findRecipient(name) {
   const q = norm(name);
+  const pq = phonetic(name);
   if (!q) return null;
   const scored = [];
   for (const [id, u] of Object.entries(load())) {
@@ -248,8 +284,11 @@ export function findRecipient(name) {
     for (const cand of [u.alias, u.username, u.first_name]) {
       const c = norm(cand);
       if (!c) continue;
+      const pc = phonetic(cand);
       let d = lev(c, q);
-      if (c.length >= 3 && q.length >= 3 && (c.includes(q) || q.includes(c))) d = Math.min(d, 0.5);
+      if (pq.length >= 3 && pc === pq) d = Math.min(d, 0.25);
+      else if (c.length >= 3 && q.length >= 3 && (c.includes(q) || q.includes(c))) d = Math.min(d, 0.5);
+      else if (pq.length >= 4 && pc.length >= 4 && lev(pc, pq) <= 1) d = Math.min(d, 0.75);
       best = Math.min(best, d);
     }
     scored.push({ d: best, user: { ...u, id } });
