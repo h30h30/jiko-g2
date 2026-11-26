@@ -357,9 +357,9 @@ export function parseCommand(text) {
     return { type: "price" };
   }
 
-  // 5) Telegram quick message / reply
-  const tellMatch = raw.match(/^(?:tell|message|text)\s+@?([a-z0-9_]+)\s+(?:that\s+)?(.+)$/i);
-  if (tellMatch && tellMatch[2].trim()) {
+// 5) Telegram quick message / reply
+  const tellMatch = raw.match(/^(?:tell|message|text)\s+@?([a-z0-9_]+)[,:\s]+(?:(?:that|to)\s+)?(.+)$/i);
+  if (tellMatch && !/^(me|us)$/i.test(tellMatch[1]) && tellMatch[2].trim()) {
     return { type: "message", name: tellMatch[1], body: tellMatch[2].trim() };
   }
   const replyToMatch = raw.match(/^reply\s+to\s+@?([a-z0-9_]+)\s*[:,-]?\s+(.+)$/i);

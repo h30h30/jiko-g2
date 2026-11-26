@@ -185,7 +185,24 @@ async function transcribe(pcm) {
 }
 
 async function understandVoice(transcript) {
-  if (!process.env.GROQ_API_KEY) return parseCommand(transcript);
+  const rawTranscript = (transcript ?? "").trim();
+
+  // Fast-path: explicit "tell/message/text <contact> ..." never gets misrouted to Notion or Balance
+  const directMsg = rawTranscript.match(
+    /^(?:tell|message|text)\s+@?([a-z0-9_]+)[,:\s]+(?:(?:that|to)\s+)?(.+)$/i
+  );
+  if (directMsg && !/^(me|us)$/i.test(directMsg[1]) && directMsg[2].trim()) {
+    const matched = findRecipient(directMsg[1]);
+    if (matched && !matched.ambiguous) {
+      return {
+        type: "message",
+        name: directMsg[1],
+        body: directMsg[2].trim().slice(0, 140),
+      };
+    }
+  }
+
+  if (!process.env.GROQ_API_KEY) return parseCommand(rawTranscript);
   const t0 = Date.now();
   const optInNames = getOptInVoiceNames();
   const contactsHint = optInNames.length
@@ -196,15 +213,16 @@ async function understandVoice(transcript) {
     "You are Jiko, a smart voice assistant on Even G2 smart glasses connected to Telegram, a TON testnet tip wallet, and Notion.\n" +
     contactsHint +
     'Treat "TON", "Toncoin", and "GRAM" identically as the same tipping token (unit: "gram").\n' +
+    'PRIORITY RULE: If the user starts with "tell <person> ...", "message <person> ...", "text <person> ...", or "reply ..." (where <person> is NOT "me" or "us"), ALWAYS classify it as type "message" — even if the message body mentions chores/tasks (like "wash the dishes") or wallet words (like "balance", "price", "notes"). Strip leading "to " or "that " from the message body.\n' +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
     '1) Sending a tip in TON/GRAM or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
     '2) Buying someone coffee(s): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
     '3) Requesting money from someone in TON/GRAM or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
-    '4) Sending a short Telegram message or replying to someone (e.g. "tell Alex I\'m 5 minutes late", "message Sam on my way", or "reply sounds good" with empty name if no person named): {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
+    '4) Sending a short Telegram message or replying to someone (e.g. "tell Alex I\'m 5 minutes late", "tell Alex to wash the dishes", or "reply sounds good" with empty name if no person named): {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
     '5) Checking live TON/USD reference rate: {"type":"price"}\n' +
     '6) Checking wallet balance: {"type":"balance"}\n' +
     '7) Checking recent TON transactions/activity: {"type":"history"}\n' +
-    '8) Saving a voice note, reminder, memo, or task to Notion: {"type":"note","content":"<clean note text>"}\n' +
+    '8) Saving a personal voice note, reminder, memo, or task to Notion (only for the user themselves, never "tell <person> ..."): {"type":"note","content":"<clean note text>"}\n' +
     '9) Simply listing/showing the latest Notion notes: {"type":"notes"}\n' +
     '10) Summarizing, analyzing, or asking questions about Notion notes, tasks, coffees, or total spending/tips logged: {"type":"notion_summary","question":"<user question>"}\n' +
     '11) Any general question, math calculation, translation, crypto concept, or assistant query: {"type":"answer","reply":"<ultra-concise answer>"}\n' +
@@ -225,7 +243,7 @@ async function understandVoice(transcript) {
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: transcript },
+          { role: "user", content: rawTranscript },
         ],
       }),
     });
@@ -258,7 +276,7 @@ async function understandVoice(transcript) {
       return { type: "note", content: String(parsed.content).trim() };
     }
     if (parsed.type === "notion_summary") {
-      return { type: "notion_summary", question: String(parsed.question || transcript).trim() };
+      return { type: "notion_summary", question: String(parsed.question || rawTranscript).trim() };
     }
     if (
       parsed.type === "price" ||
@@ -275,7 +293,7 @@ async function understandVoice(transcript) {
     console.error("AI ROUTER FALLBACK:", e.message);
   }
 
-  return parseCommand(transcript);
+  return parseCommand(rawTranscript);
 }
 
 async function summarizeNotion(question) {
