@@ -1,74 +1,97 @@
 # Jiko — Voice & HUD Companion for Even G2
 
-Jiko is a voice and glanceable HUD app for **Even G2** smart glasses paired with a **Telegram** bot ([@jikopay_bot](https://t.me/jikopay_bot)) and companion web app, connecting **Notion** tasks/notes and a **non-custodial TON Testnet** tip flow.
+Jiko is a voice and HUD app for **Even G2** smart glasses paired with a **Telegram** bot ([@jikopay_bot](https://t.me/jikopay_bot)) and companion web app, focused on quick voice capture, short replies, and small tips without pulling out your phone for every step.
 
 - **Primary Track:** Track 04 — AI Assistants & Work
 - **Secondary Track:** Track 02 — Crypto & DeFi (TON Testnet)
+- **Also Entering:** Best Telegram Integration (bot, Mini App wallet linking, pairing, and two-way replies on G2)
 - **Live Companion & Wallet Linker:** [h30h30.github.io/jiko-g2](https://h30h30.github.io/jiko-g2)
-- **Backend API & Health:** [jiko-ob5s.onrender.com/health](https://jiko-ob5s.onrender.com/health)
-- **Demo Notion Sandbox (read-only view):** [Jiko Log on Notion](https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec)
+- **Backend API & Health:** [jiko-ob5s.onrender.com/health](https://jiko-ob5s.onrender.com/health) *(free Render instance: open `/health` first and wait ~1 minute if it is asleep)*
+- **Demo Notion Sandbox (public read-only view):** [Jiko Log on Notion](https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec) *(demo data only — this page is public)*
+- **Packaged App Bundle:** [jiko-g2.ehpk](./jiko-g2.ehpk)
 - **Technical Notes:** [HANDBOOK.md](./HANDBOOK.md)
+- **Demo Video:** *(add link after recording)*
 
 ---
 
 ## What It Does Right Now
 
-- **G2 HUD & Controls:** Four swipeable cards (`Welcome`, `Wallet`, `Notion`, `Instructions`), single-tap voice capture (`15s` cap), single-tap confirmation (`8s` window), double-tap sync/cancel, and foreground enter/exit audio cleanup.
-- **Notion Task & Note Loop:** Add tasks (`"New task: ..."` / `"Add task: ..."` / `/task`), list open tasks (`"What are my open tasks?"`), mark tasks complete (`"Mark ... as done"` / `/done`), save notes (`"Note: ..."` / `/note`), search entries, request a quick HUD briefing (`"Catch me up"`), and log completed tips with optional `Amount` and `USD Ref` columns.
-- **Two-Way Telegram Replies on G2:** Send short messages via voice confirmation (`"Tell Alex ..."`), receive replies directly on the glasses display with **zero LLM processing on incoming messages**, and reply by voice or `/reply`.
-- **Non-Custodial TON Testnet Tips:** Connect a **TON Testnet** wallet (`chain: -3`) via Telegram WebApp / TON Connect, reject Mainnet wallets, convert coffee/USD amounts using a live TON/USD reference rate (`TonAPI` with `CoinGecko` and `Kraken` fallbacks), and sign transfers in your wallet while the backend watches Toncenter for on-chain confirmation.
+- **G2 HUD & Controls:** Four swipeable cards (`Welcome`, `Wallet`, `Notion`, `Voice Guide`), single-tap voice capture (`15s` cap), single-tap confirmation (`8s` window), double-tap sync/cancel, and foreground enter/exit audio cleanup.
+- **Notion Task & Note Loop:** Add tasks (`"New task: ..."` / `/task`), save voice notes (`"Note: ..."` / `/note`), list open tasks (`"What are my open tasks?"`), mark tasks done live via `PATCH` (`"Mark ... as done"` / `/done`), search entries, request a 4-line HUD briefing (`"Catch me up"`), and log completed tips with `Amount` and `USD Ref` columns.
+- **Two-Way Telegram Replies on G2:** Send messages by voice with single-tap confirmation (`"Tell Alex ..."` or `"Answer Alex ..."`), see incoming replies directly on the glasses display with **zero LLM processing on incoming messages**, and reply by voice or `/reply`.
+- **Non-Custodial TON Testnet Tips:** Connect a **TON Testnet** wallet (`chain: -3`) via Telegram WebApp / TON Connect (Mainnet wallets are rejected), send simple tips or customizable-price coffee tips using a live TON/USD reference rate (`TonAPI` with `CoinGecko` and `Kraken` fallbacks), and sign manually in your wallet while the backend watches Toncenter for confirmation.
+
+---
+
+## Who It's For & Path to Launch
+
+- **Who it's for:** Telegram-native TON users and Notion-based builders or teams who want fast voice capture, task check-offs, quick replies, and small tips on smart glasses.
+- **Path to launch:** Already packed as `jiko-g2.ehpk` for Even Hub review. Next steps before public release: per-user Notion OAuth (`Connect Notion` per Telegram account), physical G2 hardware testing (including aligning double-tap exit conventions), optional Mainnet mode with strict confirmation guardrails, and always-on production hosting.
 
 ---
 
 ## Privacy, Safety & Testnet Scope
 
-- **Testnet only (no real value):** All transfers and balances use TON Testnet (`-3`) with a `25 GRAM` per-action cap. USD figures are reference estimates (`ref`), not guaranteed execution prices.
-- **Non-custodial:** Private keys never touch the server. Every payment requires manual wallet approval and expires after 5 minutes.
-- **Voice alias opt-in:** Only explicit `/voicename` aliases are included in Groq speech/intent hints; Telegram usernames are not sent to third-party AI services, and `/voicename clear` removes the alias.
-- **Demo workspace note:** The hosted deployment uses a shared Notion Sandbox database for quick evaluation; self-hosters connect their own Notion integration and database via environment variables.
+- **Testnet only (no real value):** All transfers and balances run on TON Testnet (`-3`) with a `25 GRAM` per-action cap. USD amounts are reference estimates (`ref`), not guaranteed execution prices.
+- **Non-custodial:** Private keys never touch the server. Every transfer requires manual wallet signing and expires after 5 minutes.
+- **What goes to Groq AI vs. what does not:**
+  - Speech audio, explicit opt-in `/voicename` aliases, and Notion task/note content (for summaries, search, and semantic task matching) are sent to Groq APIs.
+  - Telegram usernames are not sent to Groq, `/voicename clear` removes your alias, and **incoming Telegram replies are never sent to any LLM**.
+- **Public demo Notion sandbox:** The hosted demo connects to a shared public Notion database so judges can test immediately without setup. Do not put private information into the demo workspace; self-hosters connect their own Notion database via environment variables.
 
 ---
 
 ## Tested vs. Planned
 
+> **Hardware note:** Tested on the **Even Hub simulator** and live backend/Telegram/Notion/TON Testnet stack; not yet tested on physical G2 hardware.
+
 | Area | Status | Notes |
 | :--- | :--- | :--- |
 | G2 simulator UI, 4 cards, Up/Down/Click/Double-Click & `.ehpk` pack | **Tested** | Built with Vite and packed via `@evenrealities/evenhub-cli` (`jiko-g2.ehpk`). |
 | Pairing (`/pair`), `/voicename`, `/coffee`, `/price` & Neon Postgres persistence | **Tested** | Verified against live Render deployment and Neon `jiko_kv` table. |
-| Notion add task, list open tasks, mark done (`PATCH`), note, search & briefing | **Tested** | Tested end-to-end against the demo Notion database. |
-| Two-way Telegram message send + incoming reply on G2 (no AI on inbound) | **Tested** | Tested with Telegram reply and `/reply` routing. |
-| TON Testnet wallet link, Mainnet rejection, coffee/USD conversion & Toncenter watch | **Tested** | Verified Mainnet warning and Testnet transfer flow. |
+| Notion add task, voice note, list open tasks, mark done (`PATCH`), search & briefing | **Tested** | Tested end-to-end against the live Notion sandbox database. |
+| Two-way Telegram send (`Tell`/`Answer`) + incoming reply on G2 (no AI on inbound) | **Tested** | Verified with live Telegram reply and `/reply` routing. |
+| TON Testnet wallet link, Mainnet rejection, coffee/USD conversion & Toncenter watch | **Tested** | Verified Mainnet block warning and Testnet transfer confirmation. |
+| Physical Even G2 hardware testing & native exit-gesture alignment | **Planned** | Currently validated on simulator only. |
 | Per-user Notion OAuth (`Connect Notion` per Telegram user) | **Planned** | Currently single-workspace via env vars; per-user OAuth is next. |
-| Session-key spending limits for hands-free micro-payments | **Planned** | Blocked by standard TON Connect signing without a custom wallet extension. |
-| Native Even Hub push notifications & continuous wake-word listening | **Planned** | Currently uses short-interval `/inbox` polling and tap-to-talk. |
+| Session-key spending limits for hands-free micro-payments | **Planned** | Requires wallet-side session allowance support beyond standard TON Connect. |
+| Native Even Hub push notifications & continuous wake-word listening | **Planned** | Currently uses 4-second `/inbox` polling and tap-to-talk. |
 
 ---
 
-## Quick Start (5 Minutes)
+## Quick Start (Node 20+)
 
-1. **Install & build the G2 web app:**
+1. **Run the G2 app locally in the Even Hub simulator:**
 
    ```bash
    npm install
-   npm run build
+   npm run dev
    ```
 
-   To pack an `.ehpk` bundle:
+   In a second terminal, launch the simulator against the Vite dev server (by default it calls `https://jiko-ob5s.onrender.com`; set `VITE_API_URL=http://127.0.0.1:8787` to point to a local backend):
 
    ```bash
+   evenhub-simulator http://localhost:5173
+   ```
+
+   To build and pack the `.ehpk` bundle:
+
+   ```bash
+   npm run build
    npx @evenrealities/evenhub-cli pack app.json dist -o jiko-g2.ehpk
    ```
 
-2. **Configure environment variables (`bot/`):**
+2. **Run the Telegram bot & backend (`bot/`):**
 
    ```bash
    cd bot
    npm install
    cp .env.example .env
-   node bot.js
+   # Fill BOT_TOKEN and GROQ_API_KEY (plus optional DATABASE_URL / NOTION_* vars)
+   node --env-file=.env bot.js
    ```
 
-3. **Link & pair:** Open [@jikopay_bot](https://t.me/jikopay_bot) in Telegram, run `/start` to link a TON Testnet wallet, run `/pair` for a 6-digit code, and enter it in the companion app.
+3. **Link & pair:** Open [@jikopay_bot](https://t.me/jikopay_bot) in Telegram, run `/start` to connect a TON Testnet wallet, optionally set `/voicename <name>`, run `/pair` for a 6-digit code, and enter it in the companion view.
 
 ---
 
@@ -77,11 +100,11 @@ Jiko is a voice and glanceable HUD app for **Even G2** smart glasses paired with
 | Variable | Required | Purpose |
 | :--- | :--- | :--- |
 | `BOT_TOKEN` | Yes | Telegram Bot API token from `@BotFather`. |
-| `GROQ_API_KEY` | Yes | Groq API key for Whisper transcription (`whisper-large-v3-turbo`) and intent/summary routing. |
+| `GROQ_API_KEY` | Yes | Groq API key for Whisper transcription (`whisper-large-v3-turbo`) and intent/Notion routing. |
 | `DATABASE_URL` | Recommended | Postgres connection string (e.g., Neon) for persistent users and G2 sessions. |
 | `NOTION_API_KEY` | Optional | Notion internal integration token. |
 | `NOTION_DATABASE_ID` | Optional | Target Notion database ID or URL. |
-| `NOTION_ALLOWED_USERS` | Optional | Comma-separated Telegram IDs or `@usernames` allowed to read/write the shared Notion database. |
+| `NOTION_ALLOWED_USERS` | Optional | Comma-separated Telegram IDs or `@usernames` allowed to read/write the Notion database. |
 | `PUBLIC_API_URL` | Optional | Public backend URL passed to `pay.html` for payment status tracking. |
 | `COFFEE_PRICE_USD` | Optional | Default USD reference price per coffee (defaults to `5`). |
 | `GROQ_STT_MODEL` | Optional | Speech model override (defaults to `whisper-large-v3-turbo`). |
@@ -102,5 +125,5 @@ Jiko is a voice and glanceable HUD app for **Even G2** smart glasses paired with
 
 ## Hackathon Build & AI Usage Disclosure
 
-- **Timeline:** Built from scratch during the hackathon (no prior codebase existed before November 23, 2026).
-- **AI assistance:** AI coding tools (including Whisper/LLM APIs and coding assistants) were used to help draft, debug, and refactor code, prompts, and documentation. All changes were reviewed, integrated, and tested manually against the live stack.
+- **What existed before Nov 23, 2026:** The official Even Hub minimal template and SDK (`@evenrealities/even_hub_sdk`, `@evenrealities/evenhub-cli`), plus open-source libraries (`grammY`, `TON Connect UI`, `pg`, `Vite`). Everything else in this repository was written between November 23 and November 29, 2026.
+- **AI assistance:** AI coding assistants and Groq APIs were used to help draft, debug, and refactor code, prompts, and documentation. All changes were reviewed, integrated, and tested manually against the live stack.

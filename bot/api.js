@@ -159,7 +159,7 @@ async function transcribe(pcm) {
   const wav = wavFromPcm(pcm);
   const optInNames = getOptInVoiceNames();
   const sttPrompt =
-    "Jiko on Even G2 glasses. Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, replies, new task, add task, mark as done, catch me up, balance, and Notion notes." +
+    "Jiko on Even G2 glasses. Voice commands for TON, GRAM, USD, coffee tips, Telegram messages, tell, answer, reply, new task, add task, mark as done, catch me up, balance, and Notion notes." +
     (optInNames.length ? " Opt-in voice names: " + optInNames.join(", ") + "." : "");
 
   const form = new FormData();
@@ -190,9 +190,9 @@ async function transcribe(pcm) {
 async function understandVoice(transcript) {
   const rawTranscript = (transcript ?? "").trim();
 
-  // Fast-path: explicit "tell/message/text <contact> ..." never gets misrouted
+  // Fast-path: explicit "tell/message/text/answer/reply <contact> ..." never gets misrouted
   const directMsg = rawTranscript.match(
-    /^(?:tell|message|text)\s+@?([a-z0-9_]+)[,:\s]+(?:(?:that|to)\s+)?(.+)$/i
+    /^(?:tell|message|text|answer|reply(?:\s+to)?)\s+(?:to\s+)?@?([a-z0-9_]+)[,:\s]+(?:(?:that|to)\s+)?(.+)$/i
   );
   if (directMsg && !/^(me|us)$/i.test(directMsg[1]) && directMsg[2].trim()) {
     const matched = findRecipient(directMsg[1]);
@@ -217,12 +217,12 @@ async function understandVoice(transcript) {
     `You are Jiko, a smart voice assistant on Even G2 smart glasses connected to Telegram, a TON testnet tip wallet, and Notion. Today is ${todayIso}.\n` +
     contactsHint +
     'Treat "TON", "Toncoin", and "GRAM" identically as the same tipping token (unit: "gram").\n' +
-    'PRIORITY RULE: If the user starts with "tell <person> ...", "message <person> ...", "text <person> ...", or "reply ..." (where <person> is NOT "me" or "us"), ALWAYS classify it as type "message" — even if the message body mentions chores/tasks or wallet words. Strip leading "to " or "that " from the message body.\n' +
+    'PRIORITY RULE: If the user starts with "tell <person> ...", "message <person> ...", "text <person> ...", "answer <person> ...", "reply to <person> ...", or "reply ..." (where <person> is NOT "me" or "us"), ALWAYS classify it as type "message" — even if the message body mentions chores/tasks or wallet words. Strip leading "to " or "that " from the message body.\n' +
     "Classify the user's spoken input into ONE JSON object (raw JSON only):\n" +
     '1) Sending a tip in TON/GRAM or USD/dollars: {"type":"tip","amount":<number>,"unit":"gram"|"usd","name":"<recipient name>"}\n' +
     '2) Buying someone coffee(s): {"type":"coffee","count":<integer >= 1>,"name":"<recipient name>"}\n' +
     '3) Requesting money from someone in TON/GRAM or USD/dollars: {"type":"ask","amount":<number>,"unit":"gram"|"usd","name":"<payer name>"}\n' +
-    '4) Sending a short Telegram message or replying to someone: {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
+    '4) Sending a short Telegram message or answering/replying to someone (e.g. "tell Alex ...", "answer Hessi ...", "reply ..."): {"type":"message","name":"<recipient name or empty string>","body":"<clean message text>"}\n' +
     '5) Adding an actionable task/todo to Notion — ONLY when the user explicitly says "new task", "add task", "create task", or "todo" (never turn general statements or rename requests into a task): {"type":"task","content":"<clean task text>","due":"<YYYY-MM-DD if date mentioned, else empty string>"}\n' +
     '6) Listing open/pending Notion tasks (e.g. "what are my open tasks?", "show my todos"): {"type":"tasks"}\n' +
     '7) Marking a Notion task as done/complete (e.g. "mark demo video as done", "complete pitch deck"): {"type":"complete_task","query":"<task keywords>"}\n' +
@@ -552,7 +552,7 @@ async function fetchHistory(address) {
   return "Recent activity:\n" + lines.join("\n");
 }
 
-// 4 clean cards: 1/4 Welcome · 2/4 Wallet · 3/4 Notion · 4/4 Instructions
+// 4 clean cards: 1/4 Welcome · 2/4 Wallet · 3/4 Notion · 4/4 Voice Guide
 async function buildCards(address, senderId, me) {
   const canUseNotion = isNotionEnabled() && isNotionAllowed(senderId, me);
   const [balRes, priceRes, notionRes] = await Promise.allSettled([
@@ -597,11 +597,12 @@ async function buildCards(address, senderId, me) {
   }
 
   const card4 =
-    "Instructions · 4/4\n" +
-    '• "Add task: demo video"\n' +
-    '• "Mark demo video done"\n' +
-    '• "Buy Alex a coffee"\n' +
-    '• "Tell Alex I\'m 5m late"';
+    "Voice Guide · 4/4\n" +
+    '• Notion Task: "New task ..."\n' +
+    '• Finish Task: "Mark ... done"\n' +
+    '• Voice Note: "Note: ..."\n' +
+    '• TON Tip: "Buy Alex a coffee"\n' +
+    '• Telegram: "Tell / Answer Alex"';
 
   return { balance: bal, cards: [card1, card2, card3, card4] };
 }
@@ -845,7 +846,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
           if (!cmd) {
             return reply(res, 200, {
               ok: false,
-              message: 'Didn\'t get that.\nTry: "Add task: ...",\n"Buy Alex a coffee", or "Catch me up"',
+              message: 'Didn\'t get that.\nTry: "New task: ...",\n"Buy Alex a coffee", or "Catch me up"',
             });
           }
 
@@ -876,7 +877,7 @@ export function startApi(bot, port = Number(process.env.PORT) || 8787) {
 
             let targetUser = null;
             const rawName = String(cmd.name || "").trim();
-            const isGenericReply = !rawName || /^(them|back|him|her|reply)$/i.test(rawName);
+            const isGenericReply = !rawName || /^(them|back|him|her|reply|answer)$/i.test(rawName);
 
             if (isGenericReply) {
               const lastIn = getLastInboxSender(senderId);
