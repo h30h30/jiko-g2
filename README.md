@@ -2,15 +2,15 @@
 
 Jiko is a voice and HUD app for **Even G2** smart glasses paired with a **Telegram** bot ([@jikopay_bot](https://t.me/jikopay_bot)) and companion web app, focused on quick voice capture, short replies, and small tips without pulling out your phone for every step.
 
+- **Demo Video (3 min live walkthrough):** [Watch Jiko Demo on YouTube](https://youtu.be/61ZwWRfrC8E)
 - **Primary Track:** Track 04 — AI Assistants & Work
 - **Secondary Track:** Track 02 — Crypto & DeFi (TON Testnet)
 - **Also Entering:** Best Telegram Integration (bot, Mini App wallet linking, pairing, and two-way replies on G2)
 - **Live Companion & Wallet Linker:** [h30h30.github.io/jiko-g2](https://h30h30.github.io/jiko-g2)
 - **Backend API & Health:** [jiko-ob5s.onrender.com/health](https://jiko-ob5s.onrender.com/health) *(free Render instance: open `/health` first and wait ~1 minute if it is asleep)*
-- **Demo Notion Sandbox (public read-only view):** [Jiko Log on Notion](https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec) *(demo data only — this page is public)*
+- **Demo Notion Sandbox (public read-only view):** [Jiko Log on Notion](https://faint-candytuft-438.notion.site/423cb74eaa9280c4825fda1dd84fbd7b?v=423cb74eaa9280b2804c000c5089cdec) *(demo data only — public page may need a refresh to show new API updates)*
 - **Packaged App Bundle:** [jiko-g2.ehpk](./jiko-g2.ehpk)
 - **Technical Notes:** [HANDBOOK.md](./HANDBOOK.md)
-- **Demo Video:** *(add link after recording)*
 
 ---
 
